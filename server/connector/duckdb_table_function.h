@@ -81,9 +81,15 @@ struct ScanSource {
 
   // Covers SearchScan / CountScan / ANNScan / RangeSearchScan -- the four
   // that need stricter transaction isolation in duckdb_scan_base.
-  bool IsSearchLike() const {
+  bool IsSearchLike() const noexcept {
     return _kind == ScanSourceKind::Search || _kind == ScanSourceKind::Count ||
            _kind == ScanSourceKind::Ann || _kind == ScanSourceKind::RangeSearch;
+  }
+
+  // Covers SecondaryIndexScan / SkPointScan / SkRangeScan.
+  bool IsSkLike() const noexcept {
+    return _kind == ScanSourceKind::SecondaryIndex ||
+           _kind == ScanSourceKind::SkPoint || _kind == ScanSourceKind::SkRange;
   }
 
   template<class T>
