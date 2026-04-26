@@ -664,7 +664,7 @@ class IndexWriter : private util::Noncopyable {
       : IndexSegment{std::move(segment)},
         old2new{std::move(old2new)},
         docs_mask{std::move(docs_mask)},
-        document_mask{{this->docs_mask.set.get_allocator()}},
+        document_mask{this->docs_mask.set.get_allocator().Manager()},
         _docs_begin{docs_begin},
         _docs_end{_docs_begin + meta.docs_count} {}
 
@@ -682,7 +682,7 @@ class IndexWriter : private util::Noncopyable {
     DocMap new2old;
     // Flushed segment removals
     DocsMask docs_mask;
-    DocumentMask document_mask;
+    DocumentHashMask document_mask;
     bool was_flush = false;
 
    private:

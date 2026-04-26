@@ -25,6 +25,7 @@
 #include <absl/functional/any_invocable.h>
 
 #include "iresearch/formats/formats.hpp"
+#include "iresearch/index/document_mask.hpp"
 #include "iresearch/index/index_reader_options.hpp"
 #include "iresearch/index/iterators.hpp"
 #include "iresearch/types.hpp"

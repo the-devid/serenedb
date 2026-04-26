@@ -58,7 +58,7 @@ inline std::string FileName<SegmentMetaWriter, SegmentMeta>(
 
 inline uint64_t WriteDocumentMask(IndexOutput& out, const auto& docs_mask) {
   // TODO(gnusi): better format
-  uint32_t mask_size = docs_mask ? static_cast<uint32_t>(docs_mask->size()) : 0;
+  uint32_t mask_size = docs_mask ? static_cast<uint32_t>(docs_mask->DeletedDocCount()) : 0;
   SDB_ASSERT(mask_size < doc_limits::eof());
 
   if (!mask_size) {

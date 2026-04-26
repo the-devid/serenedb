@@ -58,14 +58,14 @@ ReadDocumentMask(DataInput& in, IResourceManager& rm) {
     return {};
   }
 
-  auto docs_mask = std::make_shared<DocumentMask>(rm);
-  docs_mask->reserve(count);
+  auto docs_mask = std::make_shared<DocumentHashMask>(rm);
+  docs_mask->HintDeletedDocCount(count);
 
   const auto pos = in.Position();
   while (count--) {
     static_assert(sizeof(doc_id_t) == sizeof(decltype(in.ReadV32())));
 
-    docs_mask->insert(in.ReadV32());
+    docs_mask->MarkDeleted(in.ReadV32());
   }
 
   return {std::move(docs_mask), in.Position() - pos};
@@ -94,7 +94,7 @@ inline void SegmentMetaReaderImpl::read(const Directory& dir, SegmentMeta& meta,
   auto [docs_mask, docs_mask_size] =
     ReadDocumentMask(*in, *dir.ResourceManager().readers);
   const auto docs_count =
-    live_docs_count + static_cast<doc_id_t>(docs_mask ? docs_mask->size() : 0);
+    live_docs_count + static_cast<doc_id_t>(docs_mask ? docs_mask->DeletedDocCount() : 0);
   const auto size = in->ReadV64();
   const auto flags = in->ReadByte();
   field_id sort = in->ReadV64() - 1;
