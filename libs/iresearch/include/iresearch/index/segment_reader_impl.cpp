@@ -88,7 +88,7 @@ class MaskDocIterator : public DocIterator {
   doc_id_t advance() final {
     while (true) {
       const auto doc = _it->advance();
-      if (!_mask.contains(doc)) {
+      if (!_mask.IsDeleted(doc)) {
         return _doc = doc;
       }
     }
@@ -99,7 +99,7 @@ class MaskDocIterator : public DocIterator {
       return _doc;
     }
     const auto doc = _it->seek(target);
-    if (!_mask.contains(doc)) {
+    if (!_mask.IsDeleted(doc)) {
       return _doc = doc;
     }
     return advance();
@@ -136,7 +136,7 @@ class MaskedDocIterator : public DocIterator {
   doc_id_t advance() noexcept final {
     while (_next < _end) {
       _doc = _next++;
-      if (!_docs_mask.contains(_doc)) {
+      if (!_docs_mask.IsDeleted(_doc)) {
         return _doc;
       }
     }
@@ -256,7 +256,7 @@ DocIterator::ptr SegmentReaderImpl::docs_iterator() const {
   if (!_docs_mask) {
     return memory::make_managed<AllIterator>(_info.docs_count);
   }
-  SDB_ASSERT(!_docs_mask->empty());
+  SDB_ASSERT(_docs_mask->DeletedDocCount() > 0);
 
   return memory::make_managed<MaskedDocIterator>(
     doc_limits::min(), doc_limits::min() + _info.docs_count, *_docs_mask);
@@ -267,7 +267,7 @@ DocIterator::ptr SegmentReaderImpl::mask(DocIterator::ptr&& it) const {
   if (!_docs_mask) {
     return std::move(it);
   }
-  SDB_ASSERT(!_docs_mask->empty());
+  SDB_ASSERT(_docs_mask->DeletedDocCount() > 0);
 
   return memory::make_managed<MaskDocIterator>(std::move(it), *_docs_mask);
 }
