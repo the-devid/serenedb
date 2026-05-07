@@ -27,15 +27,21 @@
 #include "iresearch/formats/formats.hpp"
 #include "iresearch/index/file_names.hpp"
 #include "iresearch/store/store_utils.hpp"
+#include "iresearch/utils/bytes_utils.hpp"
 
 namespace irs {
+
+enum DocumentMaskOnDiskFormat {
+  DeletedVarintList = 0,
+  DeletedDenseBitset = 1,
+};
 
 struct SegmentMetaWriterImpl : public SegmentMetaWriter {
   static constexpr std::string_view kFormatExt = "sm";
   static constexpr std::string_view kFormatName = "iresearch_10_segment_meta";
 
   static constexpr int32_t kFormatMin = 0;
-  static constexpr int32_t kFormatMax = 0;
+  static constexpr int32_t kFormatMax = 1;
 
   explicit SegmentMetaWriterImpl(int32_t version) noexcept : _version(version) {
     SDB_ASSERT(_version >= kFormatMin && version <= kFormatMax);
@@ -54,7 +60,10 @@ inline std::string FileName<SegmentMetaWriter, SegmentMeta>(
                        SegmentMetaWriterImpl::kFormatExt);
 }
 
-inline uint64_t WriteDocumentMask(IndexOutput& out, const auto& docs_mask) {
+// The old format, not used anymore. ReadDocumentMask should support old versions,
+// so keeping serialization algorithm for visibility and benchmarking purposes.
+[[deprecated]]
+inline uint64_t WriteDocumentMaskV0(IndexOutput& out, const DocumentMask* docs_mask) {
   // TODO(gnusi): better format
   uint32_t mask_size = docs_mask ? static_cast<uint32_t>(docs_mask->DeletedDocCount()) : 0;
   SDB_ASSERT(mask_size < doc_limits::eof());
@@ -70,6 +79,40 @@ inline uint64_t WriteDocumentMask(IndexOutput& out, const auto& docs_mask) {
     out.WriteV32(doc_id);
   });
   return out.Position() - pos;
+}
+
+inline uint64_t WriteDocumentMask(IndexOutput& out, DocumentMaskView docs_mask, size_t doc_count) {
+  uint32_t deleted_doc_count = docs_mask.mask ? static_cast<uint32_t>(docs_mask.mask->DeletedDocCount()) : 0;
+  SDB_ASSERT(deleted_doc_count < doc_limits::eof());
+  out.WriteV32(doc_count);
+  out.WriteV32(deleted_doc_count);
+  if (!deleted_doc_count) {
+    return 0;
+  }
+
+  // TODO: consider deletion-ratio based choice of format, rather than straighforward counting
+  // Estimate on-disk size
+  size_t varint_list_size = 0;
+  docs_mask.mask->ForEach([&varint_list_size](doc_id_t doc_id) {
+    varint_list_size += bytes_io<doc_id_t, sizeof(doc_id_t)>::vsize(doc_id);
+  });
+  auto fixed_bitset_size = ManagedBitset::bits_to_words(doc_count) * sizeof(ManagedBitset::word_t);
+  if (varint_list_size < fixed_bitset_size) {
+    out.WriteV32(DocumentMaskOnDiskFormat::DeletedVarintList);
+    const auto pos = out.Position();
+    docs_mask.mask->ForEach([&out](doc_id_t doc_id) {
+      out.WriteV32(doc_id);
+    });
+    return out.Position() - pos;
+  } else {
+    out.WriteV32(DocumentMaskOnDiskFormat::DeletedDenseBitset);
+    // TODO: consider manual bytes filling, rather than using ManagedBitset
+    ManagedBitset deleted_docs(doc_count);
+    docs_mask.mask->ForEach([&deleted_docs](doc_id_t doc_id) { deleted_docs.set(doc_id - doc_limits::min()); });
+    const auto pos = out.Position();
+    out.WriteBytes(reinterpret_cast<const byte_type*>(deleted_docs.data()), deleted_docs.words() * sizeof(ManagedBitset::word_t));
+    return out.Position() - pos;
+  }
 }
 
 inline void WriteStrings(IndexOutput& out, const auto& strings) {
@@ -105,7 +148,7 @@ inline void SegmentMetaWriterImpl::write(Directory& dir, std::string& meta_file,
   WriteStr(*out, meta.name);
   out->WriteV64(meta.version);
   out->WriteV32(meta.live_docs_count);
-  const auto docs_mask_size = WriteDocumentMask(*out, meta.docs_mask);
+  const auto docs_mask_size = WriteDocumentMask(*out, meta.docs_mask.View(), meta.docs_count);
   out->WriteV64(size_without_mask);
   WriteStrings(*out, meta.files);
   format_utils::WriteFooter(*out);
