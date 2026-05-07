@@ -688,7 +688,7 @@ class IndexWriter : private util::Noncopyable {
     DocMap new2old;
     // Flushed segment removals
     DocsMask docs_mask;
-    DocumentHashMask document_mask;
+    DocumentBitMask document_mask;
     columnstore::PreloadedHnswGraphs cs_hnsw_graphs;
     bool was_flush = false;
 

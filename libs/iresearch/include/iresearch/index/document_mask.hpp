@@ -37,10 +37,20 @@ class DocumentHashMask final : public DocumentMask {
     : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {}
   DocumentHashMask(IResourceManager& rm, const DocumentMask& other)
     : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {
-    HintDeletedDocCount(other.DeletedDocCount());
+    stored_docs_.reserve(other.DeletedDocCount());
     other.ForEach([this](doc_id_t doc_id) { MarkDeleted(doc_id); });
   }
-
+  DocumentHashMask(IResourceManager& rm, size_t /*doc_count*/,
+                   const DocumentMask& other)
+    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {
+    stored_docs_.reserve(other.DeletedDocCount());
+    other.ForEach([this](doc_id_t doc_id) { MarkDeleted(doc_id); });
+  }
+  DocumentHashMask(IResourceManager& rm, size_t /*doc_count*/,
+                   size_t deleted_doc_count)
+    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {
+    stored_docs_.reserve(deleted_doc_count);
+  }
   bool IsDeleted(doc_id_t doc_id) const override {
     return stored_docs_.contains(doc_id);
   }
@@ -73,24 +83,47 @@ class DocumentBitMask final : public DocumentMask {
   DocumentBitMask() = default;
   explicit DocumentBitMask(IResourceManager& rm)
     : is_deleted_{rm}, deleted_doc_count_{0} {}
+
+  DocumentBitMask(IResourceManager& rm, size_t doc_count)
+    : is_deleted_{doc_count, rm}, deleted_doc_count_{0} {}
+  DocumentBitMask(IResourceManager& rm, size_t doc_count,
+                  size_t /*deleted_doc_count*/)
+    : is_deleted_{doc_count, rm}, deleted_doc_count_{0} {}
+
   DocumentBitMask(IResourceManager& rm, size_t doc_count,
                   const DocumentMask& other)
-    : is_deleted_{rm}, deleted_doc_count_{other.DeletedDocCount()} {
-    is_deleted_.resize(doc_count + doc_limits::min());
-    other.ForEach([this](doc_id_t doc_id) { is_deleted_.set(doc_id); });
+    : is_deleted_{doc_count, rm}, deleted_doc_count_{other.DeletedDocCount()} {
+    other.ForEach(
+      [this](doc_id_t doc_id) { is_deleted_.set(doc_id - doc_limits::min()); });
   }
 
   bool IsDeleted(doc_id_t doc_id) const override {
-    return is_deleted_.test(doc_id);
+    return is_deleted_.test(doc_id - doc_limits::min());
   }
   size_t DeletedDocCount() const override { return deleted_doc_count_; }
   void ForEach(const std::function<void(doc_id_t)>& cb) const override {
     // TODO: add FindNext-like method to DynamicBitset and optimize this loop
+    // NB: doc_id here is 0-based, but user of the class expects valid doc_ids
+    // to be 1-based
     for (doc_id_t doc_id = 0; doc_id < is_deleted_.size(); ++doc_id) {
       if (is_deleted_.test(doc_id)) {
-        cb(doc_id);
+        cb(doc_id + doc_limits::min());
       }
     }
+  }
+
+  bool MarkDeleted(doc_id_t doc_id) {
+    auto ret = is_deleted_.try_set(doc_id - doc_limits::min());
+    deleted_doc_count_ += static_cast<size_t>(ret);
+    return ret;
+  }
+
+  void Merge(const DocumentMask& other) {
+    other.ForEach([this](doc_id_t doc_id) { MarkDeleted(doc_id); });
+  }
+  void Clear() {
+    is_deleted_.clear();
+    deleted_doc_count_ = 0;
   }
 
  private:

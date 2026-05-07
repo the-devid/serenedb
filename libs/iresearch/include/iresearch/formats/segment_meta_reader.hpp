@@ -50,8 +50,8 @@ inline std::vector<std::string> ReadStrings(DataInput& in) {
   return strings;
 }
 
-inline std::pair<const std::shared_ptr<DocumentMask>, uint64_t>
-ReadDocumentMask(DataInput& in, IResourceManager& rm) {
+inline std::pair<DocumentMaskHandle, uint64_t>
+ReadDocumentMaskV0(DataInput& in, IResourceManager& rm) {
   auto count = in.ReadV32();
 
   if (!count) {

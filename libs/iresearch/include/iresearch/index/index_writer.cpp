@@ -33,6 +33,7 @@
 #include "basics/assert.h"
 #include "basics/resource_manager.hpp"
 #include "basics/shared.hpp"
+#include "document_mask.hpp"
 #include "iresearch/formats/format_utils.hpp"
 #include "iresearch/index/comparer.hpp"
 #include "iresearch/index/directory_reader_impl.hpp"
@@ -77,7 +78,7 @@ struct FlushedSegmentContext {
   IndexWriter::SegmentContext& segment;
   IndexWriter::FlushedSegment& flushed;
 
-  bool MakeDocumentMask(uint64_t tick, DocumentHashMask& document_mask,
+  bool MakeDocumentMask(uint64_t tick, DocumentBitMask& document_mask,
                         IndexSegment& index) {
     if (flushed.document_mask.DeletedDocCount() == flushed.meta.docs_count) {
       return true;
@@ -93,7 +94,7 @@ struct FlushedSegmentContext {
       return false;
     }
     // intentionally copy
-    document_mask = DocumentHashMask(flushed.document_mask);
+    document_mask = DocumentBitMask(flushed.document_mask);
     for (auto rbegin = end - 1;
          rbegin > begin && segment.flushed_docs[rbegin].tick > tick; --rbegin) {
       const auto old_doc = rbegin - begin + doc_limits::min();
@@ -120,14 +121,11 @@ struct FlushedSegmentContext {
       }
     }
 
-    DocumentHashMask document_mask{*rm.readers};
+    DocumentBitMask document_mask(*rm.readers, flushed.meta.docs_count);
 
     SDB_ASSERT(flushed.GetDocsBegin() < flushed.GetDocsEnd());
     const auto end = flushed.GetDocsEnd() - flushed.GetDocsBegin();
     const auto invalid_end = static_cast<size_t>(flushed.meta.docs_count);
-
-    // TODO(mbkkt) Is it good?
-    document_mask.HintDeletedDocCount(flushed.docs_mask.count + (invalid_end - end));
 
     // translate removes
     // https://lemire.me/blog/2018/02/21/iterating-over-set-bits-quickly
@@ -188,7 +186,7 @@ struct FlushedSegmentContext {
 // readers readers by segment name
 // meta key used to get reader for the segment to evaluate
 // Return if any new records were added (modification_queries_ modified).
-void RemoveFromExistingSegment(DocumentHashMask& deleted_docs,
+void RemoveFromExistingSegment(DocumentBitMask& deleted_docs,
                                IndexWriter::QueryContext& query,
                                const SubReader& reader) {
   if (query.filter == nullptr) {
@@ -222,7 +220,7 @@ void RemoveFromExistingSegment(DocumentHashMask& deleted_docs,
   }
 }
 
-bool RemoveFromImportedSegment(DocumentHashMask& deleted_docs,
+bool RemoveFromImportedSegment(DocumentBitMask& deleted_docs,
                                IndexWriter::QueryContext& query,
                                const SubReader& reader) {
   if (query.filter == nullptr) {
@@ -400,7 +398,7 @@ MapCandidatesResult MapCandidates(CandidatesMapping& candidates_mapping,
 }
 
 bool MapRemovals(const CandidatesMapping& candidates_mapping,
-                 const MergeWriter& merger, DocumentHashMask& docs_mask) {
+                 const MergeWriter& merger, DocumentBitMask& docs_mask) {
   SDB_ASSERT(merger);
 
   for (auto& mapping : candidates_mapping) {
@@ -590,11 +588,11 @@ uint64_t LimitTick(uint64_t tick, uint64_t def) noexcept {
   return tick != writer_limits::kMaxTick ? tick : def;
 }
 
-auto CopyMask(const Directory& dir, const auto& segment) {
-  if (const auto* mask = segment.docs_mask(); mask) {
-    return std::make_shared<DocumentHashMask>(*dir.ResourceManager().readers, *mask);
+auto CopyMaskAsBitMask(const Directory& dir, const auto& segment) {
+  if (const auto* mask = segment.docs_mask().mask; mask) {
+    return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, segment.Meta().docs_count, *mask);
   } else {
-    return std::make_shared<DocumentHashMask>(*dir.ResourceManager().readers);
+    return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, segment.Meta().docs_count);
   }
 }
 
@@ -1451,7 +1449,7 @@ ConsolidationResult IndexWriter::Consolidate(
     // handle removals if something changed
     if (has_removals) {
       auto docs_mask =
-        std::make_shared<DocumentHashMask>(*dir.ResourceManager().readers);
+        std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, consolidation_segment.meta.docs_count);
       if (!MapRemovals(mappings, merger, *docs_mask)) {
         // consolidated segment has docs missing from
         // current_committed_meta->segments()
@@ -1740,7 +1738,13 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
   readers.reserve(committed_reader_size);
   pending_meta.segments.reserve(committed_reader_size);
 
-  for (DocumentHashMask deleted_docs{*dir.ResourceManager().transactions};
+  uint32_t max_doc_count = 0;
+  for (const auto& existing_segment : committed_reader.GetReaders()) {
+    if (!segment_mask.contains(existing_segment->Meta().name)) {
+      max_doc_count = std::max(max_doc_count, existing_segment->Meta().docs_count);
+    }
+  }
+  for (DocumentBitMask deleted_docs{*dir.ResourceManager().transactions, max_doc_count};
        const auto& existing_segment : committed_reader.GetReaders()) {
     auto& index_segment =
       committed_meta.index_meta.segments[current_segment_index];
@@ -1778,7 +1782,7 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
       // Append removals
       IndexSegment segment{.meta = index_segment.meta};
       segment.meta.docs_mask = [&] {
-        auto docs_mask = CopyMask(dir, existing_segment);
+        auto docs_mask = CopyMaskAsBitMask(dir, existing_segment);
         docs_mask->Merge(deleted_docs);
         return docs_mask;
       }();
@@ -1812,7 +1816,7 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
     SDB_ASSERT(import.reader);  // Ensured by Consolidation/Import
     auto& meta = import.segment.meta;
     auto& import_reader = import.reader;
-    auto import_docs_mask = CopyMask(dir, *import_reader);
+    auto import_docs_mask = CopyMaskAsBitMask(dir, *import_reader);
 
     bool docs_mask_modified = false;
 
@@ -2065,7 +2069,8 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
       if (segment_ctx.segment.has_replace) {
         segment_ctx.MaskUnusedReplace(_committed_tick, tick);
       }
-      DocumentHashMask document_mask{*dir.ResourceManager().readers};
+      // NB: document_mask is initialized in the following MakeDocumentMask call
+      DocumentBitMask document_mask{*dir.ResourceManager().readers};
       IndexSegment new_segment;
       if (segment_ctx.MakeDocumentMask(tick, document_mask, new_segment)) {
         modified |= segment_ctx.flushed.was_flush;
