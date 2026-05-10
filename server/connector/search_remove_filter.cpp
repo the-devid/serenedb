@@ -27,7 +27,7 @@ namespace sdb::connector {
 irs::DocIterator::ptr SearchRemoveFilterBase::execute(
   const irs::ExecutionContext& ctx) const {
   _segment = &ctx.segment;
-  _segment_mask = ctx.segment.docs_mask();
+  _segment_mask = irs::DocumentMaskView(ctx.segment.docs_mask());
   _pending_mask = ctx.pending_docs_mask;
   _pk_field = _segment->field(kPkFieldName);
   SDB_ASSERT(_pk_field);

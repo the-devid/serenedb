@@ -200,19 +200,19 @@ void RemoveFromExistingSegment(DocumentBitMask& deleted_docs,
 
   auto itr = prepared->execute(
     {.segment = reader,
-     .pending_docs_mask = {.mask = &deleted_docs,
-                           .kind = DocumentMaskKind::DenseBitset}});
+     .pending_docs_mask = DocumentMaskView(&deleted_docs, DocumentMaskKind::DenseBitset)});
+  static_assert(std::is_same_v<std::remove_cvref_t<decltype(deleted_docs)>, DocumentBitMask>);
 
   if (!itr) [[unlikely]] {
     return;  // skip invalid iterators
   }
 
-  const auto docs_mask = reader.docs_mask();
+  const DocumentMaskView docs_mask_view(reader.docs_mask());
   while (itr->next()) {
     const auto doc_id = itr->value();
 
     // if the indexed doc_id was already masked then it should be skipped
-    if (docs_mask.IsDeleted(doc_id)) {
+    if (docs_mask_view.IsDeleted(doc_id)) {
       continue;  // the current modification query does not match any records
     }
     if (deleted_docs.MarkDeleted(doc_id)) {
@@ -235,8 +235,9 @@ bool RemoveFromImportedSegment(DocumentBitMask& deleted_docs,
 
   auto itr = prepared->execute(
     {.segment = reader,
-     .pending_docs_mask = {.mask = &deleted_docs,
-                           .kind = DocumentMaskKind::DenseBitset}});
+     .pending_docs_mask = DocumentMaskView(&deleted_docs, DocumentMaskKind::DenseBitset)});
+  static_assert(std::is_same_v<std::remove_cvref_t<decltype(deleted_docs)>, DocumentBitMask>);
+
   if (!itr) [[unlikely]] {
     return false;  // skip invalid iterators
   }
@@ -277,8 +278,8 @@ void FlushedSegmentContext::Remove(IndexWriter::QueryContext& query) {
 
   auto itr = prepared->execute(
     {.segment = *reader,
-     .pending_docs_mask = {.mask = &document_mask,
-                           .kind = DocumentMaskKind::DenseBitset}});
+     .pending_docs_mask = DocumentMaskView(&document_mask, DocumentMaskKind::DenseBitset)});
+  static_assert(std::is_same_v<std::remove_cvref_t<decltype(document_mask)>, DocumentBitMask>);
 
   if (!itr) [[unlikely]] {
     return;  // Skip invalid iterators
@@ -594,7 +595,7 @@ uint64_t LimitTick(uint64_t tick, uint64_t def) noexcept {
 }
 
 auto CopyMaskAsBitMask(const Directory& dir, const auto& segment) {
-  if (const auto* mask = segment.docs_mask().mask; mask) {
+  if (const auto* mask = segment.docs_mask(); mask) {
     return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, segment.Meta().docs_count, *mask);
   } else {
     return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, segment.Meta().docs_count);
@@ -1478,7 +1479,7 @@ ConsolidationResult IndexWriter::Consolidate(
 
   index_utils::FlushIndexSegment(dir, consolidation_segment, false);
 
-  if (consolidation_segment.meta.docs_mask.mask) {
+  if (consolidation_segment.meta.docs_mask) {
     pending_reader =
       pending_reader->UpdateMeta(dir, consolidation_segment.meta);
   }
@@ -2038,7 +2039,7 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
 
         SDB_ASSERT(flushed.meta.live_docs_count != 0);
         SDB_ASSERT(flushed.meta.live_docs_count <= flushed.meta.docs_count);
-        SDB_ASSERT(!flushed.meta.docs_mask.mask);
+        SDB_ASSERT(!flushed.meta.docs_mask);
 
         auto reader = [&] {
           if (auto it = curr_cached.find(&flushed); it != curr_cached.end()) {

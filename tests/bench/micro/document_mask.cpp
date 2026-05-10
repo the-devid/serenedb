@@ -148,23 +148,23 @@ void BmDispatchInsideLoop(benchmark::State& state) {
 
   auto mask = BuildMask<DocumentBitMask>(
     doc_count, doc_count * delete_permille / 1000, kSeed);
-  auto handle = irs::BuildImmutableRepresentation(irs::IResourceManager::gNoop,
+  const auto doc_mask_view = irs::DocumentMaskView(irs::BuildImmutableRepresentation(irs::IResourceManager::gNoop,
                                                   DocumentMaskKind::DenseBitset,
-                                                  std::move(mask));
+                                                  std::move(mask)).get());
   for (auto _ : state) {
     for (doc_id_t doc_id = irs::doc_limits::min();
          doc_id < irs::doc_limits::min() + doc_count; ++doc_id) {
-      benchmark::DoNotOptimize(handle.IsDeleted(doc_id));
+      benchmark::DoNotOptimize(doc_mask_view.IsDeleted(doc_id));
     }
   }
 }
 
 template<typename MaskType>
-void RunLoopIsDeleted(const irs::DocumentMaskHandle& handle, size_t doc_count) {
+void RunLoopIsDeleted(const irs::DocumentMaskView& doc_mask_view, size_t doc_count) {
   for (doc_id_t doc_id = irs::doc_limits::min();
        doc_id < irs::doc_limits::min() + doc_count; ++doc_id) {
     benchmark::DoNotOptimize(
-      static_cast<const MaskType*>(handle.mask.get())->IsDeleted(doc_id));
+      static_cast<const MaskType*>(doc_mask_view.Mask())->IsDeleted(doc_id));
   }
 }
 void BmDispatchOutsideLoop(benchmark::State& state) {
@@ -173,18 +173,18 @@ void BmDispatchOutsideLoop(benchmark::State& state) {
   const auto doc_count = static_cast<size_t>(state.range(0));
   const auto delete_permille = static_cast<size_t>(state.range(1));
 
-  auto mask = BuildMask<DocumentBitMask>(
+  auto bit_mask = BuildMask<DocumentBitMask>(
     doc_count, doc_count * delete_permille / 1000, kSeed);
-  const auto handle = irs::BuildImmutableRepresentation(
+  const irs::DocumentMaskView doc_mask_view(irs::BuildImmutableRepresentation(
     irs::IResourceManager::gNoop, DocumentMaskKind::DenseBitset,
-    std::move(mask));
+    std::move(bit_mask)).get());
   for (auto _ : state) {
-    switch (handle.kind) {
+    switch (doc_mask_view.Kind()) {
       case DocumentMaskKind::DenseBitset:
-        RunLoopIsDeleted<DocumentBitMask>(handle, doc_count);
+        RunLoopIsDeleted<DocumentBitMask>(doc_mask_view, doc_count);
         break;
       case DocumentMaskKind::DeletedHashSet:
-        RunLoopIsDeleted<DocumentHashMask>(handle, doc_count);
+        RunLoopIsDeleted<DocumentHashMask>(doc_mask_view, doc_count);
         break;
       case DocumentMaskKind::None:
         break;

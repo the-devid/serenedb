@@ -81,8 +81,8 @@ inline uint64_t WriteDocumentMaskV0(IndexOutput& out, const DocumentMask* docs_m
   return out.Position() - pos;
 }
 
-inline uint64_t WriteDocumentMask(IndexOutput& out, DocumentMaskView docs_mask, size_t doc_count) {
-  uint32_t deleted_doc_count = docs_mask.mask ? static_cast<uint32_t>(docs_mask.mask->DeletedDocCount()) : 0;
+inline uint64_t WriteDocumentMask(IndexOutput& out, const DocumentMask* docs_mask, size_t doc_count) {
+  uint32_t deleted_doc_count = docs_mask ? static_cast<uint32_t>(docs_mask->DeletedDocCount()) : 0;
   SDB_ASSERT(deleted_doc_count < doc_limits::eof());
   out.WriteV32(doc_count);
   out.WriteV32(deleted_doc_count);
@@ -93,14 +93,14 @@ inline uint64_t WriteDocumentMask(IndexOutput& out, DocumentMaskView docs_mask, 
   // TODO: consider deletion-ratio based choice of format, rather than straighforward counting
   // Estimate on-disk size
   size_t varint_list_size = 0;
-  docs_mask.mask->ForEach([&varint_list_size](doc_id_t doc_id) {
+  docs_mask->ForEach([&varint_list_size](doc_id_t doc_id) {
     varint_list_size += bytes_io<doc_id_t, sizeof(doc_id_t)>::vsize(doc_id);
   });
   auto fixed_bitset_size = ManagedBitset::bits_to_words(doc_count) * sizeof(ManagedBitset::word_t);
   if (varint_list_size < fixed_bitset_size) {
     out.WriteV32(DocumentMaskOnDiskFormat::DeletedVarintList);
     const auto pos = out.Position();
-    docs_mask.mask->ForEach([&out](doc_id_t doc_id) {
+    docs_mask->ForEach([&out](doc_id_t doc_id) {
       out.WriteV32(doc_id);
     });
     return out.Position() - pos;
@@ -108,7 +108,7 @@ inline uint64_t WriteDocumentMask(IndexOutput& out, DocumentMaskView docs_mask, 
     out.WriteV32(DocumentMaskOnDiskFormat::DeletedDenseBitset);
     // TODO: consider manual bytes filling, rather than using ManagedBitset
     ManagedBitset deleted_docs(doc_count);
-    docs_mask.mask->ForEach([&deleted_docs](doc_id_t doc_id) { deleted_docs.set(doc_id - doc_limits::min()); });
+    docs_mask->ForEach([&deleted_docs](doc_id_t doc_id) { deleted_docs.set(doc_id - doc_limits::min()); });
     const auto pos = out.Position();
     out.WriteBytes(reinterpret_cast<const byte_type*>(deleted_docs.data()), deleted_docs.words() * sizeof(ManagedBitset::word_t));
     return out.Position() - pos;
@@ -148,7 +148,7 @@ inline void SegmentMetaWriterImpl::write(Directory& dir, std::string& meta_file,
   WriteStr(*out, meta.name);
   out->WriteV64(meta.version);
   out->WriteV32(meta.live_docs_count);
-  const auto docs_mask_size = WriteDocumentMask(*out, meta.docs_mask.View(), meta.docs_count);
+  const auto docs_mask_size = WriteDocumentMask(*out, meta.docs_mask.get(), meta.docs_count);
   out->WriteV64(size_without_mask);
   WriteStrings(*out, meta.files);
   format_utils::WriteFooter(*out);

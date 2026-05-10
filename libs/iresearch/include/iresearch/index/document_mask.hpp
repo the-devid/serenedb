@@ -12,6 +12,12 @@
 
 namespace irs {
 
+enum class DocumentMaskKind {
+  None,
+  DeletedHashSet,
+  DenseBitset,
+};
+
 // Interface for a view of a mask of deleted documents in an index's segment
 class DocumentMask {
  public:
@@ -19,6 +25,7 @@ class DocumentMask {
   virtual bool IsDeleted(doc_id_t doc_id) const = 0;
   virtual size_t DeletedDocCount() const = 0;
   virtual void ForEach(const std::function<void(doc_id_t)>& cb) const = 0;
+  virtual DocumentMaskKind Kind() const = 0;
 
   bool operator==(const DocumentMask& other) const {
     bool equal = (DeletedDocCount() == other.DeletedDocCount());
@@ -28,6 +35,9 @@ class DocumentMask {
     return equal;
   }
   bool IsEmpty() const { return DeletedDocCount() == 0; }
+  static DocumentMaskKind GetKind(const DocumentMask* mask) {
+    return mask ? mask->Kind() : DocumentMaskKind::None;
+  }
 };
 
 class DocumentHashMask final : public DocumentMask {
@@ -60,6 +70,7 @@ class DocumentHashMask final : public DocumentMask {
       cb(doc_id);
     }
   }
+  DocumentMaskKind Kind() const override { return DocumentMaskKind::DeletedHashSet; }
 
   bool MarkDeleted(doc_id_t doc_id) {
     return stored_docs_.insert(doc_id).second;
@@ -111,6 +122,7 @@ class DocumentBitMask final : public DocumentMask {
       }
     }
   }
+  DocumentMaskKind Kind() const override { return DocumentMaskKind::DenseBitset; }
 
   bool MarkDeleted(doc_id_t doc_id) {
     auto ret = is_deleted_.try_set(doc_id - doc_limits::min());
@@ -128,22 +140,19 @@ class DocumentBitMask final : public DocumentMask {
 
  private:
   ManagedBitset is_deleted_;
-  size_t deleted_doc_count_{
-    0};  // to not run popcount each DeletedDocCount call
-};
-
-enum class DocumentMaskKind {
-  None,
-  DeletedHashSet,
-  DenseBitset,
+  size_t deleted_doc_count_ = 0;  // to not run popcount each DeletedDocCount call
 };
 
 // Stores pointer with tag and runs bounded dispatching of lookups into document
 // mask, allowing compiler to inline function calls and prevent full vtable
 // lookup.
-struct DocumentMaskView {
-  const DocumentMask* mask;
-  DocumentMaskKind kind;
+class DocumentMaskView {
+public:
+  DocumentMaskView() : mask{nullptr}, kind{DocumentMaskKind::None} {}
+  explicit DocumentMaskView(const DocumentMask* mask) : mask{mask}, kind{DocumentMask::GetKind(mask)} {}
+  DocumentMaskView(const DocumentMask* mask, DocumentMaskKind kind) : mask{mask}, kind{kind} {
+    SDB_ASSERT(DocumentMask::GetKind(mask) == kind);
+  }
 
   bool IsDeleted(doc_id_t doc_id) const {
     switch (kind) {
@@ -157,6 +166,14 @@ struct DocumentMaskView {
                static_cast<const DocumentBitMask*>(mask)->IsDeleted(doc_id);
     }
   }
+  size_t DeletedDocCount() const {
+    return mask ? mask->DeletedDocCount() : 0;
+  }
+  bool IsEmpty() const {
+    return mask ? mask->IsEmpty() : true;
+  }
+  DocumentMaskKind Kind() const { return kind; }
+  const DocumentMask* Mask() const { return mask; }
 
   bool operator==(const DocumentMaskView& rhs) const {
     if (mask == rhs.mask) {
@@ -169,24 +186,9 @@ struct DocumentMaskView {
     return *mask == *rhs.mask;
   }
 
-  const DocumentMask* operator->() const { return mask; }
-  const DocumentMask& operator*() const { return *mask; }
-};
-
-struct DocumentMaskHandle {
-  std::shared_ptr<const DocumentMask> mask;
+private:
+  const DocumentMask* mask;
   DocumentMaskKind kind;
-
-  DocumentMaskView View() const { return {.mask = mask.get(), .kind = kind}; }
-
-  bool IsDeleted(doc_id_t doc_id) const { return View().IsDeleted(doc_id); }
-
-  bool operator==(const DocumentMaskHandle& rhs) const {
-    return View() == rhs.View();
-  }
-
-  const DocumentMask* operator->() const { return mask.get(); }
-  const DocumentMask& operator*() const { return *mask; }
 };
 
 inline DocumentMaskKind ChooseImmutableRepresentation(
@@ -198,17 +200,15 @@ inline DocumentMaskKind ChooseImmutableRepresentation(
   }
 }
 
-inline DocumentMaskHandle BuildImmutableRepresentation(
+inline std::shared_ptr<const DocumentMask> BuildImmutableRepresentation(
   IResourceManager& rm, DocumentMaskKind kind, DocumentBitMask&& bit_mask) {
   switch (kind) {
     case DocumentMaskKind::None:
-      return {nullptr, DocumentMaskKind::None};
+      return nullptr;
     case DocumentMaskKind::DeletedHashSet:
-      return {std::make_shared<DocumentHashMask>(rm, bit_mask),
-              DocumentMaskKind::DeletedHashSet};
+      return std::make_shared<DocumentHashMask>(rm, bit_mask);
     case DocumentMaskKind::DenseBitset:
-      return {std::make_shared<DocumentBitMask>(std::move(bit_mask)),
-              DocumentMaskKind::DenseBitset};
+      return std::make_shared<DocumentBitMask>(std::move(bit_mask));
   }
 }
 

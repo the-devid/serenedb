@@ -253,23 +253,23 @@ const columnstore::HNSWReader* SegmentReaderImpl::HNSW(field_id field) const {
 }
 
 DocIterator::ptr SegmentReaderImpl::docs_iterator() const {
-  if (!_docs_mask.mask) {
+  if (!_docs_mask) {
     return memory::make_managed<AllIterator>(_info.docs_count);
   }
-  SDB_ASSERT(_docs_mask.mask->DeletedDocCount() > 0);
+  SDB_ASSERT(_docs_mask->DeletedDocCount() > 0);
 
   return memory::make_managed<MaskedDocIterator>(
-    doc_limits::min(), doc_limits::min() + _info.docs_count, _docs_mask.View());
+    doc_limits::min(), doc_limits::min() + _info.docs_count, DocumentMaskView(_docs_mask.get()));
 }
 
 DocIterator::ptr SegmentReaderImpl::mask(DocIterator::ptr&& it) const {
   SDB_ASSERT(it);
-  if (!_docs_mask.mask) {
+  if (!_docs_mask) {
     return std::move(it);
   }
-  SDB_ASSERT(_docs_mask.mask->DeletedDocCount() > 0);
+  SDB_ASSERT(_docs_mask->DeletedDocCount() > 0);
 
-  return memory::make_managed<MaskDocIterator>(std::move(it), _docs_mask.View());
+  return memory::make_managed<MaskDocIterator>(std::move(it), DocumentMaskView(_docs_mask.get()));
 }
 
 void SegmentReaderImpl::ColumnData::Open(const Directory& dir,

@@ -35,7 +35,7 @@ struct EmptySubReader final : SubReader {
 
   NormReader::ptr norms(field_id) const final { return {}; }
   const SegmentInfo& Meta() const final { return kEmptyInfo; }
-  DocumentMaskView docs_mask() const final { return {nullptr, DocumentMaskKind::None}; }
+  const DocumentMask* docs_mask() const final { return nullptr; }
   DocIterator::ptr docs_iterator() const final { return DocIterator::empty(); }
   const irs::TermReader* field(std::string_view) const final { return nullptr; }
   irs::FieldIterator::ptr fields() const final {

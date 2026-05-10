@@ -1093,7 +1093,7 @@ struct SegmentReaderMock final : irs::SubReader {
   }
   uint64_t CountMappedMemory() const final { return 0; }
   const irs::SegmentInfo& Meta() const final { return _meta; }
-  irs::DocumentMaskView docs_mask() const final { return irs::DocumentMaskView{nullptr, irs::DocumentMaskKind::None}; }
+  const irs::DocumentMask* docs_mask() const final { return nullptr; }
   irs::DocIterator::ptr docs_iterator() const final {
     return irs::DocIterator::empty();
   }
