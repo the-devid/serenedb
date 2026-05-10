@@ -291,6 +291,11 @@ class WalBatchReplay final : public rocksdb::WriteBatch::Handler {
     return DeleteCF(cf_id, key);
   }
 
+  rocksdb::Status MergeCF(uint32_t cf_id, const rocksdb::Slice& /*key*/,
+                          const rocksdb::Slice& /*value*/) final {
+    return rocksdb::Status::OK();
+  }
+
   rocksdb::Status DeleteRangeCF(uint32_t cf_id, const rocksdb::Slice& begin,
                                 const rocksdb::Slice& end) final {
     if (cf_id != _default_cf_id) {
