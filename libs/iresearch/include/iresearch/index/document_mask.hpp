@@ -24,6 +24,7 @@ class DocumentMask {
   virtual ~DocumentMask() = default;
   virtual bool IsDeleted(doc_id_t doc_id) const = 0;
   virtual size_t DeletedDocCount() const = 0;
+  virtual size_t DocCount() const = 0;
   virtual void ForEach(const std::function<void(doc_id_t)>& cb) const = 0;
   virtual DocumentMaskKind Kind() const = 0;
 
@@ -46,25 +47,20 @@ class DocumentHashMask final : public DocumentMask {
   explicit DocumentHashMask(IResourceManager& rm)
     : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {}
   DocumentHashMask(IResourceManager& rm, const DocumentMask& other)
-    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {
+    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}}, doc_count_{other.DocCount()} {
     stored_docs_.reserve(other.DeletedDocCount());
     other.ForEach([this](doc_id_t doc_id) { MarkDeleted(doc_id); });
   }
-  DocumentHashMask(IResourceManager& rm, size_t /*doc_count*/,
-                   const DocumentMask& other)
-    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {
-    stored_docs_.reserve(other.DeletedDocCount());
-    other.ForEach([this](doc_id_t doc_id) { MarkDeleted(doc_id); });
-  }
-  DocumentHashMask(IResourceManager& rm, size_t /*doc_count*/,
+  DocumentHashMask(IResourceManager& rm, size_t doc_count,
                    size_t deleted_doc_count)
-    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}} {
+    : stored_docs_{ManagedTypedAllocator<doc_id_t>{rm}}, doc_count_{doc_count} {
     stored_docs_.reserve(deleted_doc_count);
   }
   bool IsDeleted(doc_id_t doc_id) const override {
     return stored_docs_.contains(doc_id);
   }
   size_t DeletedDocCount() const override { return stored_docs_.size(); }
+  size_t DocCount() const override { return doc_count_; }
   void ForEach(const std::function<void(doc_id_t)>& cb) const override {
     for (auto doc_id : stored_docs_) {
       cb(doc_id);
@@ -87,6 +83,7 @@ class DocumentHashMask final : public DocumentMask {
                       absl::container_internal::hash_default_eq<doc_id_t>,
                       ManagedTypedAllocator<doc_id_t>>
     stored_docs_;
+  size_t doc_count_ = 0;
 };
 
 class DocumentBitMask final : public DocumentMask {
@@ -101,9 +98,8 @@ class DocumentBitMask final : public DocumentMask {
                   size_t /*deleted_doc_count*/)
     : is_deleted_{doc_count, rm}, deleted_doc_count_{0} {}
 
-  DocumentBitMask(IResourceManager& rm, size_t doc_count,
-                  const DocumentMask& other)
-    : is_deleted_{doc_count, rm}, deleted_doc_count_{other.DeletedDocCount()} {
+  DocumentBitMask(IResourceManager& rm, const DocumentMask& other)
+    : is_deleted_{other.DocCount(), rm}, deleted_doc_count_{other.DeletedDocCount()} {
     other.ForEach(
       [this](doc_id_t doc_id) { is_deleted_.set(doc_id - doc_limits::min()); });
   }
@@ -112,6 +108,7 @@ class DocumentBitMask final : public DocumentMask {
     return is_deleted_.test(doc_id - doc_limits::min());
   }
   size_t DeletedDocCount() const override { return deleted_doc_count_; }
+  size_t DocCount() const override { return is_deleted_.size(); }
   void ForEach(const std::function<void(doc_id_t)>& cb) const override {
     // NB: doc_id here is 0-based, but user of the class expects valid doc_ids
     // to be 1-based
@@ -197,22 +194,30 @@ private:
 
 inline DocumentMaskKind ChooseImmutableRepresentation(
   size_t doc_count, size_t deleted_doc_count) {
-  if (deleted_doc_count < doc_count / 100) {  // 0 <= x <1% of documents
+  if (deleted_doc_count == 0) {
+    return DocumentMaskKind::None;
+  } else if (deleted_doc_count < doc_count / 100) {  // 0 < x <1% of documents
     return DocumentMaskKind::DeletedHashSet;
   } else {  // 1 <= x <= 100% of documents
     return DocumentMaskKind::DenseBitset;
   }
 }
 
-inline std::shared_ptr<const DocumentMask> BuildImmutableRepresentation(
-  IResourceManager& rm, DocumentMaskKind kind, DocumentBitMask&& bit_mask) {
+inline std::shared_ptr<DocumentMask> MakeDocumentMask(
+  IResourceManager& rm, DocumentMaskKind kind, DocumentMask&& mask) {
   switch (kind) {
     case DocumentMaskKind::None:
       return nullptr;
     case DocumentMaskKind::DeletedHashSet:
-      return std::make_shared<DocumentHashMask>(rm, bit_mask);
+      if (mask.Kind() == DocumentMaskKind::DeletedHashSet) {
+        return std::make_shared<DocumentHashMask>(static_cast<DocumentHashMask&&>(mask));
+      }
+      return std::make_shared<DocumentHashMask>(rm, mask);
     case DocumentMaskKind::DenseBitset:
-      return std::make_shared<DocumentBitMask>(std::move(bit_mask));
+      if (mask.Kind() == DocumentMaskKind::DenseBitset) {
+        return std::make_shared<DocumentBitMask>(static_cast<DocumentBitMask&&>(mask));
+      }
+      return std::make_shared<DocumentBitMask>(rm, mask);
   }
 }
 

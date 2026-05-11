@@ -49,7 +49,7 @@ template<>
 DocumentBitMask BuildMask<DocumentBitMask>(size_t doc_count,
                                            size_t deleted_count, int seed) {
   auto source = BuildHashMask(doc_count, deleted_count, seed);
-  return DocumentBitMask{irs::IResourceManager::gNoop, doc_count, source};
+  return DocumentBitMask(irs::IResourceManager::gNoop, std::move(source));
 }
 
 // Builds a vector of size kPostingListSize of document ids to lookup in
@@ -148,7 +148,7 @@ void BmDispatchInsideLoop(benchmark::State& state) {
 
   auto mask = BuildMask<DocumentBitMask>(
     doc_count, doc_count * delete_permille / 1000, kSeed);
-  const auto doc_mask_view = irs::DocumentMaskView(irs::BuildImmutableRepresentation(irs::IResourceManager::gNoop,
+  const auto doc_mask_view = irs::DocumentMaskView(irs::MakeDocumentMask(irs::IResourceManager::gNoop,
                                                   DocumentMaskKind::DenseBitset,
                                                   std::move(mask)).get());
   for (auto _ : state) {
@@ -175,7 +175,7 @@ void BmDispatchOutsideLoop(benchmark::State& state) {
 
   auto bit_mask = BuildMask<DocumentBitMask>(
     doc_count, doc_count * delete_permille / 1000, kSeed);
-  const irs::DocumentMaskView doc_mask_view(irs::BuildImmutableRepresentation(
+  const irs::DocumentMaskView doc_mask_view(irs::MakeDocumentMask(
     irs::IResourceManager::gNoop, DocumentMaskKind::DenseBitset,
     std::move(bit_mask)).get());
   for (auto _ : state) {

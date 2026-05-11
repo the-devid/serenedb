@@ -71,54 +71,22 @@ ReadDocumentMaskV0(DataInput& in, IResourceManager& rm) {
   return {std::move(docs_mask), in.Position() - pos};
 }
 
-#define CALL_READER(ReadFunction, document_mask_kind, ...)           \
-  [&]() -> std::pair<std::shared_ptr<DocumentMask>, uint64_t> {      \
-    switch (document_mask_kind) {                                    \
-      case DocumentMaskKind::None: {                                 \
-        throw IllegalState{                                          \
-          absl::StrCat("Bad choice of document mask format: None")}; \
-      }                                                              \
-      case DocumentMaskKind::DeletedHashSet: {                       \
-        return ReadFunction<DocumentHashMask>(__VA_ARGS__);          \
-      }                                                              \
-      case DocumentMaskKind::DenseBitset: {                          \
-        return ReadFunction<DocumentBitMask>(__VA_ARGS__);           \
-      }                                                              \
-    }                                                                \
-  }()
-
-template<typename T>
-concept HasMarkDeleted = requires(T t) { t.MarkDeleted(doc_id_t{1}); };
-
-template<typename TDocumentMask>
 std::pair<std::shared_ptr<DocumentMask>, uint64_t>
 ReadDocumentMaskDeletedVarintList(DataInput& in, IResourceManager& rm,
                                   size_t doc_count, size_t deleted_doc_count) {
   auto pos = in.Position();
-  DocumentHashMask hash_mask(rm, doc_count, deleted_doc_count);
+  DocumentHashMask docs_mask(rm, doc_count, deleted_doc_count);
   while (deleted_doc_count--) {
-    hash_mask.MarkDeleted(in.ReadV32());
+    static_assert(sizeof(doc_id_t) == sizeof(decltype(in.ReadV32())));
+    docs_mask.MarkDeleted(in.ReadV32());
   }
-  return {std::make_shared<TDocumentMask>(rm, hash_mask), in.Position() - pos};
+  return {std::make_shared<DocumentHashMask>(std::move(docs_mask)),
+          in.Position() - pos};
 }
 
-template<HasMarkDeleted TDocumentMask>
-std::pair<std::shared_ptr<DocumentMask>, uint64_t>
-ReadDocumentMaskDeletedVarintList(DataInput& in, IResourceManager& rm,
-                                  size_t doc_count, size_t deleted_doc_count) {
-  auto pos = in.Position();
-  auto docs_mask =
-    std::make_shared<TDocumentMask>(rm, doc_count, deleted_doc_count);
-  while (deleted_doc_count--) {
-    docs_mask->MarkDeleted(in.ReadV32());
-  }
-  return {std::move(docs_mask), in.Position() - pos};
-}
-
-template<typename TDocumentMask>
-std::pair<std::shared_ptr<DocumentMask>, uint64_t>
-ReadDocumentMaskDenseBitset(DataInput& in, IResourceManager& rm,
-                            size_t doc_count, size_t deleted_doc_count) {
+std::pair<std::shared_ptr<DocumentMask>, uint64_t> ReadDocumentMaskDenseBitset(
+  DataInput& in, IResourceManager& rm, size_t doc_count,
+  size_t deleted_doc_count) {
   auto pos = in.Position();
   DocumentBitMask bitset(rm, doc_count, deleted_doc_count);
   auto byte_count =
@@ -126,34 +94,14 @@ ReadDocumentMaskDenseBitset(DataInput& in, IResourceManager& rm,
   for (size_t i = 0; i < byte_count; i++) {
     auto b = in.ReadByte();
     for (size_t j = 0; j < BitsRequired<decltype(b)>(); j++) {
-      if (b & (1 << j)) {
+      if ((b >> j) & 1) {
         bitset.MarkDeleted(i * BitsRequired<decltype(b)>() + j +
                            doc_limits::min());
       }
     }
   }
-  return {std::make_shared<TDocumentMask>(rm, bitset), in.Position() - pos};
-}
-
-template<HasMarkDeleted TDocumentMask>
-std::pair<std::shared_ptr<DocumentMask>, uint64_t> ReadDocumentMaskDenseBitset(
-  DataInput& in, IResourceManager& rm, size_t doc_count,
-  size_t deleted_doc_count) {
-  auto pos = in.Position();
-  auto docs_mask =
-    std::make_shared<TDocumentMask>(rm, doc_count, deleted_doc_count);
-  auto byte_count =
-    ManagedBitset::bits_to_words(doc_count) * sizeof(ManagedBitset::word_t);
-  for (size_t i = 0; i < byte_count; i++) {
-    auto b = in.ReadByte();
-    for (size_t j = 0; j < BitsRequired<decltype(b)>(); j++) {
-      if (b & (1 << j)) {
-        docs_mask->MarkDeleted(i * BitsRequired<decltype(b)>() + j +
-                               doc_limits::min());
-      }
-    }
-  }
-  return {std::move(docs_mask), in.Position() - pos};
+  return {std::make_shared<DocumentBitMask>(std::move(bitset)),
+          in.Position() - pos};
 }
 
 inline std::pair<std::shared_ptr<DocumentMask>, uint64_t> ReadDocumentMask(
@@ -168,14 +116,22 @@ inline std::pair<std::shared_ptr<DocumentMask>, uint64_t> ReadDocumentMask(
   auto chosen_kind =
     ChooseImmutableRepresentation(doc_count, deleted_doc_count);
 
+  std::shared_ptr<DocumentMask> docs_mask;
+  uint64_t mask_size;
+
   switch (format) {
     case DocumentMaskOnDiskFormat::DeletedVarintList:
-      return CALL_READER(ReadDocumentMaskDeletedVarintList, chosen_kind, in, rm, doc_count, deleted_doc_count);
+      std::tie(docs_mask, mask_size) =
+        ReadDocumentMaskDeletedVarintList(in, rm, doc_count, deleted_doc_count);
+      break;
     case DocumentMaskOnDiskFormat::DeletedDenseBitset:
-      return CALL_READER(ReadDocumentMaskDenseBitset, chosen_kind, in, rm, doc_count, deleted_doc_count);
+      std::tie(docs_mask, mask_size) =
+        ReadDocumentMaskDenseBitset(in, rm, doc_count, deleted_doc_count);
+      break;
     default:
       throw IndexError{absl::StrCat("Unknown document mask format: ", format)};
   }
+  return {MakeDocumentMask(rm, chosen_kind, std::move(*docs_mask)), mask_size};
 }
 
 inline void SegmentMetaReaderImpl::read(const Directory& dir, SegmentMeta& meta,

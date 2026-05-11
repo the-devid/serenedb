@@ -596,7 +596,7 @@ uint64_t LimitTick(uint64_t tick, uint64_t def) noexcept {
 
 auto CopyMaskAsBitMask(const Directory& dir, const auto& segment) {
   if (const auto* mask = segment.docs_mask(); mask) {
-    return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, segment.Meta().docs_count, *mask);
+    return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, *mask);
   } else {
     return std::make_shared<DocumentBitMask>(*dir.ResourceManager().readers, segment.Meta().docs_count);
   }
@@ -1469,7 +1469,7 @@ ConsolidationResult IndexWriter::Consolidate(
       }
 
       SDB_ASSERT(!docs_mask->IsEmpty());
-      consolidation_segment.meta.docs_mask = BuildImmutableRepresentation(
+      consolidation_segment.meta.docs_mask = MakeDocumentMask(
         *dir.ResourceManager().readers,
         ChooseImmutableRepresentation(consolidation_segment.meta.docs_count,
                                       docs_mask->DeletedDocCount()),
@@ -1794,7 +1794,7 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
       segment.meta.docs_mask = [&] {
         auto docs_mask = CopyMaskAsBitMask(dir, existing_segment);
         docs_mask->Merge(deleted_docs);
-        return BuildImmutableRepresentation(
+        return MakeDocumentMask(
           *dir.ResourceManager().readers,
           ChooseImmutableRepresentation(segment.meta.docs_count,
                                         docs_mask->DeletedDocCount()),
@@ -1918,7 +1918,7 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
     }
 
     if (docs_mask_modified) {
-      meta.docs_mask = BuildImmutableRepresentation(
+      meta.docs_mask = MakeDocumentMask(
         *dir.ResourceManager().readers,
         ChooseImmutableRepresentation(meta.docs_count,
                                       import_docs_mask->DeletedDocCount()),
@@ -2103,7 +2103,7 @@ IndexWriter::PendingContext IndexWriter::PrepareFlush(const CommitInfo& info) {
         ++segment_ctx.flushed.meta.version;
       }
       if (!document_mask.IsEmpty()) {
-        new_segment.meta.docs_mask = BuildImmutableRepresentation(
+        new_segment.meta.docs_mask = MakeDocumentMask(
           *dir.ResourceManager().readers,
           ChooseImmutableRepresentation(new_segment.meta.docs_count,
                                         document_mask.DeletedDocCount()),
