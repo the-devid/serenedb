@@ -1235,9 +1235,11 @@ auto PgSQLCommTaskBase::ProcessQueryResult() -> ProcessState {
   auto& portal = *_current_portal;
   SDB_ASSERT(portal.stmt);
 
-  // If we have a pending query, drive execution
   if (portal.pending) {
-    auto status = portal.pending->ExecuteTask();
+    auto status = portal.pending->ExecuteTask(
+      [weak = weak_from_this(), feature = &_feature] {
+        feature->ScheduleProcessWakeup(weak);
+      });
     switch (status) {
       case duckdb::PendingExecutionResult::RESULT_READY: {
         // Execution complete -- get the streaming result
@@ -1257,12 +1259,7 @@ auto PgSQLCommTaskBase::ProcessQueryResult() -> ProcessState {
         // More work needed -- continue polling
         return ProcessState::More;
       case duckdb::PendingExecutionResult::BLOCKED:
-        // Blocked -- register callback and return Wait
-        duckdb::Executor::Get(*_duckdb_conn->context)
-          .SetTaskRescheduledCallback(
-            [weak = weak_from_this(), feature = &_feature] {
-              feature->ScheduleProcessWakeup(weak);
-            });
+        // Blocked -- callback was registered by ExecuteTask.
         return ProcessState::Wait;
       case duckdb::PendingExecutionResult::EXECUTION_FINISHED:
         // Same as RESULT_READY -- execution complete
