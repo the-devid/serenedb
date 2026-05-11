@@ -113,12 +113,16 @@ class DocumentBitMask final : public DocumentMask {
   }
   size_t DeletedDocCount() const override { return deleted_doc_count_; }
   void ForEach(const std::function<void(doc_id_t)>& cb) const override {
-    // TODO: add FindNext-like method to DynamicBitset and optimize this loop
     // NB: doc_id here is 0-based, but user of the class expects valid doc_ids
     // to be 1-based
-    for (doc_id_t doc_id = 0; doc_id < is_deleted_.size(); ++doc_id) {
-      if (is_deleted_.test(doc_id)) {
-        cb(doc_id + doc_limits::min());
+    auto word_count = is_deleted_.words();
+    for (size_t word_idx = 0; word_idx < word_count; ++word_idx) {
+      auto word = is_deleted_[word_idx];
+      const auto id_base = word_idx * BitsRequired<bitset::word_t>() + doc_limits::min();
+      while (word) {
+        auto lsb = word & -word;
+        cb(id_base + std::countr_zero(lsb));
+        word ^= lsb;
       }
     }
   }
