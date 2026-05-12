@@ -28,7 +28,7 @@ DocumentDeletedHashMask BuildHashMask(size_t doc_count, size_t deleted_count,
   std::iota(all_ids.begin(), all_ids.end(), 1);
   std::shuffle(all_ids.begin(), all_ids.end(), std::mt19937(seed));
   for (size_t i = 0; i < deleted_count; ++i) {
-    mask.MarkDeleted(all_ids[i]);
+    mask.Store(all_ids[i]);
   }
   return mask;
 }

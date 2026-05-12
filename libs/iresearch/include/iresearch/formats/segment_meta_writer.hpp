@@ -34,6 +34,7 @@ namespace irs {
 enum DocumentMaskOnDiskFormat {
   DeletedVarintList = 0,
   DeletedDenseBitset = 1,
+  AliveVarintList = 2,
 };
 
 struct SegmentMetaWriterImpl : public SegmentMetaWriter {
@@ -92,15 +93,32 @@ inline uint64_t WriteDocumentMask(IndexOutput& out, const DocumentMask* docs_mas
 
   // TODO: consider deletion-ratio based choice of format, rather than straighforward counting
   // Estimate on-disk size
-  size_t varint_list_size = 0;
-  docs_mask->ForEachDeleted([&varint_list_size](doc_id_t doc_id) {
-    varint_list_size += bytes_io<doc_id_t, sizeof(doc_id_t)>::vsize(doc_id);
-  });
+  size_t deleted_varint_list_size = std::numeric_limits<size_t>::max();
+  size_t alive_varint_list_size = std::numeric_limits<size_t>::max();
+  if (deleted_doc_count < doc_count - deleted_doc_count) {
+    deleted_varint_list_size = 0;
+    docs_mask->ForEachDeleted([&deleted_varint_list_size](doc_id_t doc_id) {
+      deleted_varint_list_size += bytes_io<doc_id_t, sizeof(doc_id_t)>::vsize(doc_id);
+    });
+  } else {
+    alive_varint_list_size = 0;
+    docs_mask->ForEachAlive([&alive_varint_list_size](doc_id_t doc_id) {
+      alive_varint_list_size += bytes_io<doc_id_t, sizeof(doc_id_t)>::vsize(doc_id);
+    });
+  }
   auto fixed_bitset_size = ManagedBitset::bits_to_words(doc_count) * sizeof(ManagedBitset::word_t);
-  if (varint_list_size < fixed_bitset_size) {
+  auto optimal_size = std::min({deleted_varint_list_size, alive_varint_list_size, fixed_bitset_size});
+  if (optimal_size == deleted_varint_list_size) {
     out.WriteV32(DocumentMaskOnDiskFormat::DeletedVarintList);
     const auto pos = out.Position();
     docs_mask->ForEachDeleted([&out](doc_id_t doc_id) {
+      out.WriteV32(doc_id);
+    });
+    return out.Position() - pos;
+  } else if (optimal_size == alive_varint_list_size) {
+    out.WriteV32(DocumentMaskOnDiskFormat::AliveVarintList);
+    const auto pos = out.Position();
+    docs_mask->ForEachAlive([&out](doc_id_t doc_id) {
       out.WriteV32(doc_id);
     });
     return out.Position() - pos;

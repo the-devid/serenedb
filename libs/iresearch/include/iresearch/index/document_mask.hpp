@@ -113,12 +113,8 @@ class DocumentHashMask final : public DocumentMask {
                         : DocumentMaskKind::AliveHashSet;
   }
 
-  bool MarkDeleted(doc_id_t doc_id) {
-    if constexpr (StoreDeleted) {
-      return stored_docs_.insert(doc_id).second;
-    } else {
-      return stored_docs_.erase(doc_id) != 0;
-    }
+  bool Store(doc_id_t doc_id) {
+    return stored_docs_.insert(doc_id).second;
   }
   void HintDeletedDocCount(size_t count) {
     if constexpr (StoreDeleted) {

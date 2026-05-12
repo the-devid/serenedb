@@ -964,8 +964,8 @@ TEST_P(FormatTestCase, segment_meta_read_write) {
     meta.version = 100;
     meta.docs_mask = std::make_shared<irs::DocumentDeletedHashMask>([&] {
       irs::DocumentDeletedHashMask docs_mask{irs::IResourceManager::gNoop, 453, 2};
-      docs_mask.MarkDeleted(42);
-      docs_mask.MarkDeleted(100);
+      docs_mask.Store(42);
+      docs_mask.Store(100);
       return docs_mask;
     }());
     meta.files.emplace_back("file1");
@@ -1131,9 +1131,9 @@ TEST_P(FormatTestCase, segment_meta_read_write) {
 
     irs::SegmentMeta meta;
     irs::DocumentDeletedHashMask docs_mask{irs::IResourceManager::gNoop, 1453, 3};
-    docs_mask.MarkDeleted(42);
-    docs_mask.MarkDeleted(100);
-    docs_mask.MarkDeleted(200);
+    docs_mask.Store(42);
+    docs_mask.Store(100);
+    docs_mask.Store(200);
     meta.name = "broken_meta_name";
     meta.docs_count = 1453;
     meta.live_docs_count = 1451;

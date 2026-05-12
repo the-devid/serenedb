@@ -64,7 +64,7 @@ ReadDocumentMaskV0(DataInput& in, IResourceManager& rm, size_t live_docs_count) 
   while (count--) {
     static_assert(sizeof(doc_id_t) == sizeof(decltype(in.ReadV32())));
 
-    docs_mask->MarkDeleted(in.ReadV32());
+    docs_mask->Store(in.ReadV32());
   }
 
   return {std::move(docs_mask), in.Position() - pos};
@@ -77,9 +77,23 @@ ReadDocumentMaskDeletedVarintList(DataInput& in, IResourceManager& rm,
   DocumentDeletedHashMask docs_mask(rm, doc_count, deleted_doc_count);
   while (deleted_doc_count--) {
     static_assert(sizeof(doc_id_t) == sizeof(decltype(in.ReadV32())));
-    docs_mask.MarkDeleted(in.ReadV32());
+    docs_mask.Store(in.ReadV32());
   }
   return {std::make_shared<DocumentDeletedHashMask>(std::move(docs_mask)),
+          in.Position() - pos};
+}
+
+std::pair<std::shared_ptr<DocumentMask>, uint64_t>
+ReadDocumentMaskAliveVarintList(DataInput& in, IResourceManager& rm,
+                                  size_t doc_count, size_t deleted_doc_count) {
+  auto pos = in.Position();
+  DocumentAliveHashMask docs_mask(rm, doc_count, deleted_doc_count);
+  auto alive_doc_count = doc_count - deleted_doc_count;
+  while (alive_doc_count--) {
+    static_assert(sizeof(doc_id_t) == sizeof(decltype(in.ReadV32())));
+    docs_mask.Store(in.ReadV32());
+  }
+  return {std::make_shared<DocumentAliveHashMask>(std::move(docs_mask)),
           in.Position() - pos};
 }
 
@@ -126,6 +140,10 @@ inline std::pair<std::shared_ptr<DocumentMask>, uint64_t> ReadDocumentMask(
     case DocumentMaskOnDiskFormat::DeletedDenseBitset:
       std::tie(docs_mask, mask_size) =
         ReadDocumentMaskDenseBitset(in, rm, doc_count, deleted_doc_count);
+      break;
+    case DocumentMaskOnDiskFormat::AliveVarintList:
+      std::tie(docs_mask, mask_size) =
+        ReadDocumentMaskAliveVarintList(in, rm, doc_count, deleted_doc_count);
       break;
     default:
       throw IndexError{absl::StrCat("Unknown document mask format: ", format)};
