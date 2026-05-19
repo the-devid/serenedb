@@ -74,7 +74,7 @@ class DocumentHashMask final : public DocumentMask {
       stored_docs_.reserve(doc_count - deleted_doc_count);
     }
   }
-  bool IsDeleted(doc_id_t doc_id) const override {
+  IRS_FORCE_INLINE bool IsDeleted(doc_id_t doc_id) const override {
     return stored_docs_.contains(doc_id) == StoreDeleted;
   }
   size_t DeletedDocCount() const override {
@@ -155,7 +155,7 @@ class DocumentBitMask final : public DocumentMask {
       [this](doc_id_t doc_id) { is_deleted_.set(doc_id - doc_limits::min()); });
   }
 
-  bool IsDeleted(doc_id_t doc_id) const override {
+  IRS_FORCE_INLINE bool IsDeleted(doc_id_t doc_id) const override {
     return is_deleted_.test(doc_id - doc_limits::min());
   }
   size_t DeletedDocCount() const override { return deleted_doc_count_; }
@@ -232,7 +232,7 @@ class DocumentMaskView {
     SDB_ASSERT(DocumentMask::GetKind(mask) == kind);
   }
 
-  bool IsDeleted(doc_id_t doc_id) const {
+  IRS_FORCE_INLINE bool IsDeleted(doc_id_t doc_id) const {
     switch (kind) {
       case DocumentMaskKind::None:
         return false;
