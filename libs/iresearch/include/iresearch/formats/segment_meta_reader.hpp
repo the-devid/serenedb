@@ -70,7 +70,7 @@ ReadDocumentMaskV0(DataInput& in, IResourceManager& rm, size_t live_docs_count) 
   return {std::move(docs_mask), in.Position() - pos};
 }
 
-std::pair<std::shared_ptr<DocumentMask>, uint64_t>
+inline std::pair<std::shared_ptr<DocumentMask>, uint64_t>
 ReadDocumentMaskDeletedVarintList(DataInput& in, IResourceManager& rm,
                                   size_t doc_count, size_t deleted_doc_count) {
   auto pos = in.Position();
@@ -83,9 +83,9 @@ ReadDocumentMaskDeletedVarintList(DataInput& in, IResourceManager& rm,
           in.Position() - pos};
 }
 
-std::pair<std::shared_ptr<DocumentMask>, uint64_t>
+inline std::pair<std::shared_ptr<DocumentMask>, uint64_t>
 ReadDocumentMaskAliveVarintList(DataInput& in, IResourceManager& rm,
-                                  size_t doc_count, size_t deleted_doc_count) {
+                                size_t doc_count, size_t deleted_doc_count) {
   auto pos = in.Position();
   DocumentAliveHashMask docs_mask(rm, doc_count, deleted_doc_count);
   auto alive_doc_count = doc_count - deleted_doc_count;
@@ -97,9 +97,9 @@ ReadDocumentMaskAliveVarintList(DataInput& in, IResourceManager& rm,
           in.Position() - pos};
 }
 
-std::pair<std::shared_ptr<DocumentMask>, uint64_t> ReadDocumentMaskDenseBitset(
-  DataInput& in, IResourceManager& rm, size_t doc_count,
-  size_t deleted_doc_count) {
+inline std::pair<std::shared_ptr<DocumentMask>, uint64_t>
+ReadDocumentMaskDenseBitset(DataInput& in, IResourceManager& rm,
+                            size_t doc_count, size_t deleted_doc_count) {
   auto pos = in.Position();
   DocumentBitMask bitset(rm, doc_count, deleted_doc_count);
   auto byte_count =

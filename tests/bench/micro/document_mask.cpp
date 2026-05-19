@@ -288,6 +288,8 @@ void BmMaskMemory(benchmark::State& state) {
   state.counters["mask_bytes"] = static_cast<double>(after - before);
 
 #ifdef SERENEDB_HAVE_JEMALLOC_PROF
+  // NB: for single benchmark call. To analyze multiple benchmarks one need to
+  // change the name to be state-dependent.
   const char* fname = "mask_memory.prof";
   mallctl("prof.dump", nullptr, nullptr, static_cast<void*>(&fname),
           sizeof(fname));
