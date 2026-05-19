@@ -832,11 +832,27 @@ duckdb::PhysicalOperator& SereneDBCreateIndexPlan(
     }
     auto& view = basics::downCast<catalog::PgSqlView>(*relation);
     const auto& vinfo = view.GetInfo();
-    view_columns.reserve(vinfo.names.size());
-    for (size_t i = 0; i < vinfo.names.size(); ++i) {
-      view_columns.emplace_back(ObjectId{}, catalog::Column::Id{i},
-                                vinfo.names[i], vinfo.types[i]);
-      view_columns.back().SetId(catalog::Column::Id{i});
+    // When pruning narrowed the view, build view_columns only for the
+    // surviving positions. column.id keeps the original view position
+    // so downstream id-based lookups stay stable.
+    std::vector<size_t> view_positions;
+    if (auto it = op.info->options.find("_sdb_view_kept_positions");
+        it != op.info->options.end()) {
+      for (const auto& v : duckdb::ListValue::GetChildren(it->second)) {
+        view_positions.push_back(v.GetValue<uint64_t>());
+      }
+    } else {
+      view_positions.reserve(vinfo.names.size());
+      for (size_t i = 0; i < vinfo.names.size(); ++i) {
+        view_positions.push_back(i);
+      }
+    }
+    view_columns.reserve(view_positions.size());
+    for (auto p : view_positions) {
+      SDB_ASSERT(p < vinfo.names.size());
+      view_columns.emplace_back(ObjectId{}, catalog::Column::Id{p},
+                                vinfo.names[p], vinfo.types[p]);
+      view_columns.back().SetId(catalog::Column::Id{p});
     }
   } else {
     auto& table_catalog = op.table.Cast<duckdb::TableCatalogEntry>();

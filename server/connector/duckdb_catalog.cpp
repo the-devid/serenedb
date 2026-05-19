@@ -536,6 +536,64 @@ duckdb::PhysicalOperator& ResolveDefaultsWithGenerated(
   return pass2;
 }
 
+std::vector<duckdb::idx_t> ComputeKeptViewPositions(
+  const duckdb::vector<duckdb::unique_ptr<duckdb::ParsedExpression>>&
+    parsed_index_exprs,
+  const duckdb::ViewColumnInfo& column_info) {
+  std::vector<duckdb::idx_t> kept;
+  kept.reserve(parsed_index_exprs.size());
+  for (const auto& expr : parsed_index_exprs) {
+    if (expr->GetExpressionType() != duckdb::ExpressionType::COLUMN_REF) {
+      continue;
+    }
+    const auto& name =
+      expr->Cast<duckdb::ColumnRefExpression>().GetColumnName();
+    for (size_t i = 0; i < column_info.names.size(); ++i) {
+      if (column_info.names[i] == name) {
+        kept.push_back(i);
+        break;
+      }
+    }
+  }
+  absl::c_sort(kept);
+  kept.erase(std::unique(kept.begin(), kept.end()), kept.end());
+  return kept;
+}
+
+// Wrap `plan` in a LogicalProjection that enumerates only the kept view
+// columns + PK plumbing. Optimizer rule RemoveUnusedColumns then treats this
+// projection as a scope boundary and prunes the chain below to match. Need this
+// as CREATE INDEX itself is not a prune boundary.
+duckdb::unique_ptr<duckdb::LogicalOperator> InsertBackfillFilterProjection(
+  duckdb::unique_ptr<duckdb::LogicalOperator> plan,
+  const std::vector<duckdb::idx_t>& kept_view, duckdb::idx_t view_decl_size,
+  duckdb::idx_t vcols_count, duckdb::TableIndex new_table_index) {
+  plan->ResolveOperatorTypes();
+  const auto top_bindings = plan->GetColumnBindings();
+  const auto& top_types = plan->types;
+  SDB_ASSERT(top_bindings.size() == view_decl_size + vcols_count,
+             "chain top should expose view cols + PK plumbing: got ",
+             top_bindings.size(), ", expected ", view_decl_size + vcols_count);
+
+  duckdb::vector<duckdb::unique_ptr<duckdb::Expression>> filter_exprs;
+  filter_exprs.reserve(kept_view.size() + vcols_count);
+  for (auto v : kept_view) {
+    SDB_ASSERT(v < view_decl_size);
+    filter_exprs.push_back(duckdb::make_uniq<duckdb::BoundColumnRefExpression>(
+      top_types[v], top_bindings[v]));
+  }
+  for (duckdb::idx_t i = 0; i < vcols_count; ++i) {
+    auto p = view_decl_size + i;
+    filter_exprs.push_back(duckdb::make_uniq<duckdb::BoundColumnRefExpression>(
+      top_types[p], top_bindings[p]));
+  }
+
+  auto proj = duckdb::make_uniq<duckdb::LogicalProjection>(
+    new_table_index, std::move(filter_exprs));
+  proj->children.push_back(std::move(plan));
+  return proj;
+}
+
 }  // namespace
 
 duckdb::PhysicalOperator& SereneDBCatalog::PlanInsert(
@@ -906,6 +964,8 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
   bool view_backed = false;
   std::optional<ViewFastPath> view_fast_path;
   int64_t pinned_iceberg_snapshot_id = 0;
+  std::optional<std::vector<duckdb::idx_t>> kept_view_positions;
+  std::optional<std::vector<duckdb::column_t>> vcols_opt;
   if (target.type == duckdb::CatalogType::VIEW_ENTRY) {
     view_backed = true;
     auto is_fast_path_wrapper = [](duckdb::LogicalOperator& op) -> bool {
@@ -948,7 +1008,9 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
     }
     if (fp && leaf_get) {
       view_fast_path = std::move(fp);
-      auto vcols = BackfillPkVirtualColumns(*view_fast_path);
+      vcols_opt = BackfillPkVirtualColumns(*view_fast_path);
+      const auto& vcols = *vcols_opt;
+
       const auto leaf_orig_size = leaf_get->GetColumnIds().size();
       duckdb::vector<duckdb::LogicalType> pk_types;
       pk_types.reserve(vcols.size());
@@ -977,6 +1039,10 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
           leaf_get->GetColumnType(leaf_get->GetColumnIds()[i]));
       }
       for (size_t i = 0; i < vcols.size(); ++i) {
+        // TODO(Dronplane): deduplicate when vcols[i] already appears in
+        // leaf_get->column_ids (RocksDBExplicitPK + user-named PK key);
+        // requires teaching the runtime to find the PK at a non-fixed
+        // chunk position. See Case 7 in inverted_index_view_pruning.test
         leaf_get->AddColumnId(vcols[i]);
         leaf_get->types.push_back(pk_types[i]);
         // Iceberg's get_virtual_columns omits file_index even though the
@@ -1021,6 +1087,34 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
           ExtractIcebergSnapshotId(*leaf_get->bind_data);
         EnableIcebergSort(leaf_get->bind_data.get());
       }
+
+      auto& view_entry = target.Cast<duckdb::ViewCatalogEntry>();
+      auto column_info = view_entry.GetColumnInfo();
+      SDB_ASSERT(column_info,
+                 "view must be bound by the time fp && leaf_get holds -- "
+                 "the leaf get came from binding the view body");
+      auto kept = ComputeKeptViewPositions(
+        stmt.info->Cast<duckdb::CreateIndexInfo>().parsed_expressions,
+        *column_info);
+      if (kept.size() < column_info->names.size()) {
+        plan = InsertBackfillFilterProjection(
+          std::move(plan), kept, column_info->names.size(), vcols.size(),
+          binder.GenerateTableIndex());
+        kept_view_positions = std::move(kept);
+      }
+    } else {
+      auto& view_entry = target.Cast<duckdb::ViewCatalogEntry>();
+      if (auto column_info = view_entry.GetColumnInfo()) {
+        auto kept = ComputeKeptViewPositions(
+          stmt.info->Cast<duckdb::CreateIndexInfo>().parsed_expressions,
+          *column_info);
+        if (kept.size() < column_info->names.size()) {
+          plan = InsertBackfillFilterProjection(
+            std::move(plan), kept, column_info->names.size(),
+            /*vcols_count=*/0, binder.GenerateTableIndex());
+          kept_view_positions = std::move(kept);
+        }
+      }
     }
   } else {
     resolved_table = &target.Cast<duckdb::TableCatalogEntry>();
@@ -1058,11 +1152,18 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
                       ERR_MSG("view \"", target.name,
                               "\" must be bound before it can be indexed"));
     }
-    rel_columns.assign_range(
-      std::views::iota(size_t{0}, column_info->names.size()) |
-      std::views::transform([&](size_t i) {
-        return std::pair{column_info->names[i], column_info->types[i]};
-      }));
+    if (kept_view_positions) {
+      rel_columns.reserve(kept_view_positions->size());
+      for (auto p : *kept_view_positions) {
+        rel_columns.emplace_back(column_info->names[p], column_info->types[p]);
+      }
+    } else {
+      rel_columns.assign_range(
+        std::views::iota(size_t{0}, column_info->names.size()) |
+        std::views::transform([&](size_t i) {
+          return std::pair{column_info->names[i], column_info->types[i]};
+        }));
+    }
   } else {
     auto& sdb_entry = RequireBaseTable(*resolved_table);
     sdb_table = sdb_entry.GetSereneDBTable();
@@ -1158,7 +1259,10 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
             duckdb::Value("rocksdb_rowid");
           break;
         default: {
-          const auto vcols = BackfillPkVirtualColumns(*view_fast_path);
+          SDB_ASSERT(vcols_opt,
+                     "view_fast_path set but vcols not populated -- the "
+                     "two are produced together in the leaf-rewrite block");
+          const auto& vcols = *vcols_opt;
           if (vcols.size() == 1) {
             create_index_info->options["_sdb_view_fast_path_pk"] =
               duckdb::Value("file_row_number");
@@ -1173,6 +1277,16 @@ duckdb::unique_ptr<duckdb::LogicalOperator> SereneDBCatalog::BindCreateIndex(
         create_index_info->options["_sdb_iceberg_snapshot_id"] =
           duckdb::Value::BIGINT(pinned_iceberg_snapshot_id);
       }
+    }
+    if (kept_view_positions) {
+      duckdb::vector<duckdb::Value> kept_values;
+      kept_values.reserve(kept_view_positions->size());
+      for (auto p : *kept_view_positions) {
+        kept_values.emplace_back(duckdb::Value::UBIGINT(p));
+      }
+      create_index_info->options["_sdb_view_kept_positions"] =
+        duckdb::Value::LIST(duckdb::LogicalType::UBIGINT,
+                            std::move(kept_values));
     }
     // column_binding_resolver synthesises (TableIndex(0), i) for
     // LOGICAL_CREATE_INDEX.
