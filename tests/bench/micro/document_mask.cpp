@@ -1,14 +1,20 @@
 #include <benchmark/benchmark.h>
 
+#ifdef SERENEDB_HAVE_JEMALLOC
+#include <jemalloc/jemalloc.h>
+#endif
+
+#include <iresearch/formats/segment_meta_writer.hpp>
 #include <iresearch/index/document_mask.hpp>
+#include <iresearch/store/memory_directory.hpp>
 #include <numeric>
 #include <random>
 #include <vector>
 
 using irs::doc_id_t;
+using irs::DocumentAliveHashMask;
 using irs::DocumentBitMask;
 using irs::DocumentDeletedHashMask;
-using irs::DocumentAliveHashMask;
 using irs::DocumentMask;
 using irs::DocumentMaskKind;
 using std::vector;
@@ -22,8 +28,9 @@ static constexpr size_t kPostingListCount = 20;
 
 // Build uniformly random set of deleted_count ids to be put as deleted in mask
 DocumentDeletedHashMask BuildHashMask(size_t doc_count, size_t deleted_count,
-                               int seed) {
-  DocumentDeletedHashMask mask{irs::IResourceManager::gNoop, doc_count, deleted_count};
+                                      int seed) {
+  DocumentDeletedHashMask mask{irs::IResourceManager::gNoop, doc_count,
+                               deleted_count};
   vector<doc_id_t> all_ids(doc_count);
   std::iota(all_ids.begin(), all_ids.end(), 1);
   std::shuffle(all_ids.begin(), all_ids.end(), std::mt19937(seed));
@@ -35,13 +42,15 @@ DocumentDeletedHashMask BuildHashMask(size_t doc_count, size_t deleted_count,
 
 template<typename MaskType>
 MaskType BuildMask(size_t doc_count, size_t deleted_count, int seed) {
-  auto source = BuildMask<DocumentDeletedHashMask>(doc_count, deleted_count, seed);
+  auto source =
+    BuildMask<DocumentDeletedHashMask>(doc_count, deleted_count, seed);
   return MaskType(irs::IResourceManager::gNoop, source);
 }
 
 template<>
 DocumentDeletedHashMask BuildMask<DocumentDeletedHashMask>(size_t doc_count,
-                                             size_t deleted_count, int seed) {
+                                                           size_t deleted_count,
+                                                           int seed) {
   return BuildHashMask(doc_count, deleted_count, seed);
 }
 
@@ -132,11 +141,63 @@ void BmScanIsDeleted(benchmark::State& state) {
   }
 }
 
-void MaskArgs(benchmark::internal::Benchmark* b) {
-  for (auto doc_cnt : {10000, 100000, 1000000}) {
-    for (auto pmle : {10, 100, 300, 500, 700, 900, 990}) {
-      b->Args({doc_cnt, pmle});
-    }
+// Benchmarks iteration via ForEachDeleted method of document mask.
+template<typename MaskType>
+void BmIterateDeleted(benchmark::State& state) {
+  constexpr size_t kSeed = 43;
+
+  const auto doc_count = static_cast<size_t>(state.range(0));
+  const auto delete_permille = static_cast<size_t>(state.range(1));
+
+  auto mask =
+    BuildMask<MaskType>(doc_count, doc_count * delete_permille / 1000, kSeed);
+
+  for (auto _ : state) {
+    mask.ForEachDeleted(
+      [](doc_id_t doc_id) { benchmark::DoNotOptimize(doc_id); });
+  }
+}
+
+// Benchmarks iteration via ForEachAlive method of document mask.
+template<typename MaskType>
+void BmIterateAlive(benchmark::State& state) {
+  constexpr size_t kSeed = 43;
+
+  const auto doc_count = static_cast<size_t>(state.range(0));
+  const auto delete_permille = static_cast<size_t>(state.range(1));
+
+  auto mask =
+    BuildMask<MaskType>(doc_count, doc_count * delete_permille / 1000, kSeed);
+
+  for (auto _ : state) {
+    mask.ForEachAlive(
+      [](doc_id_t doc_id) { benchmark::DoNotOptimize(doc_id); });
+  }
+}
+
+typedef uint64_t WriteDocumentMaskFn(irs::IndexOutput&,
+                                     const irs::DocumentMask&);
+
+// Benchmarks on-disk mask write
+template<typename MaskType, WriteDocumentMaskFn WriteDocumentMaskPayload>
+void BmWriteDocumentMaskPayload(benchmark::State& state) {
+  constexpr size_t kSeed = 43;
+
+  const auto doc_count = static_cast<size_t>(state.range(0));
+  const auto delete_permille = static_cast<size_t>(state.range(1));
+  const auto deleted_doc_count = doc_count * delete_permille / 1000;
+
+  auto mask = BuildMask<MaskType>(doc_count, deleted_doc_count, kSeed);
+
+  for (auto _ : state) {
+    irs::MemoryFile file{irs::IResourceManager::gNoop};
+    irs::MemoryIndexOutput out{file};
+
+    out.WriteV32(static_cast<uint32_t>(doc_count));
+    out.WriteV32(static_cast<uint32_t>(deleted_doc_count));
+    benchmark::DoNotOptimize(WriteDocumentMaskPayload(out, mask));
+    out.Flush();
+    state.counters["bytes_written"] = static_cast<double>(file.Length());
   }
 }
 
@@ -161,7 +222,8 @@ void BmDispatchInsideLoop(benchmark::State& state) {
 }
 
 template<typename MaskType>
-void RunLoopIsDeleted(const irs::DocumentMaskView& doc_mask_view, size_t doc_count) {
+void RunLoopIsDeleted(const irs::DocumentMaskView& doc_mask_view,
+                      size_t doc_count) {
   for (doc_id_t doc_id = irs::doc_limits::min();
        doc_id < irs::doc_limits::min() + doc_count; ++doc_id) {
     benchmark::DoNotOptimize(
@@ -192,16 +254,95 @@ void BmDispatchOutsideLoop(benchmark::State& state) {
         break;
       case DocumentMaskKind::AliveHashSet:
         RunLoopIsDeleted<DocumentAliveHashMask>(doc_mask_view, doc_count);
+        break;
     }
   }
 }
 
-BENCHMARK_TEMPLATE(BmIsDeleted, DocumentDeletedHashMask)->Apply(MaskArgs);
-BENCHMARK_TEMPLATE(BmIsDeleted, DocumentBitMask)->Apply(MaskArgs);
-BENCHMARK_TEMPLATE(BmIsDeleted, DocumentAliveHashMask)->Apply(MaskArgs);
+#ifdef SERENEDB_HAVE_JEMALLOC
+template<typename MaskType>
+void BmMaskMemory(benchmark::State& state) {
+  constexpr size_t kSeed = 43;
+  const auto doc_count = static_cast<size_t>(state.range(0));
+  const auto delete_permille = static_cast<size_t>(state.range(1));
+
+#ifdef SERENEDB_HAVE_JEMALLOC_PROF
+  mallctl("prof.reset", nullptr, nullptr, nullptr, 0);
+#endif
+  uint64_t epoch = 1;
+  size_t sz = sizeof(epoch);
+  mallctl("epoch", &epoch, &sz, &epoch, sz);
+  size_t before;
+  sz = sizeof(before);
+  mallctl("stats.allocated", &before, &sz, nullptr, 0);
+
+  auto mask =
+    BuildMask<MaskType>(doc_count, doc_count * delete_permille / 1000, kSeed);
+
+  epoch = 1;
+  sz = sizeof(epoch);
+  mallctl("epoch", &epoch, &sz, &epoch, sz);
+  size_t after;
+  sz = sizeof(after);
+  mallctl("stats.allocated", &after, &sz, nullptr, 0);
+  state.counters["mask_bytes"] = static_cast<double>(after - before);
+
+#ifdef SERENEDB_HAVE_JEMALLOC_PROF
+  const char* fname = "mask_memory.prof";
+  mallctl("prof.dump", nullptr, nullptr, static_cast<void*>(&fname),
+          sizeof(fname));
+#endif
+
+  // Dummy
+  for (auto _ : state) {
+    benchmark::DoNotOptimize(mask.IsDeleted(1));
+  }
+}
+#endif
+
+void MaskArgs(benchmark::internal::Benchmark* b) {
+  for (auto doc_cnt : {4000000}) {
+    for (auto pmle : {1, 10, 100, 300, 500, 700, 900, 990, 999}) {
+      b->Args({doc_cnt, pmle});
+    }
+  }
+}
+
+#ifdef SERENEDB_HAVE_JEMALLOC
+BENCHMARK_TEMPLATE(BmMaskMemory, DocumentDeletedHashMask)
+  ->Apply(MaskArgs)
+  ->Iterations(1);
+BENCHMARK_TEMPLATE(BmMaskMemory, DocumentBitMask)
+  ->Apply(MaskArgs)
+  ->Iterations(1);
+BENCHMARK_TEMPLATE(BmMaskMemory, DocumentAliveHashMask)
+  ->Apply(MaskArgs)
+  ->Iterations(1);
+#endif
+
+BENCHMARK_TEMPLATE(BmWriteDocumentMaskPayload, DocumentDeletedHashMask,
+                   irs::WriteDocumentMaskDeletedVarintList)
+  ->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmWriteDocumentMaskPayload, DocumentAliveHashMask,
+                   irs::WriteDocumentMaskAliveVarintList)
+  ->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmWriteDocumentMaskPayload, DocumentDeletedHashMask,
+                   irs::WriteDocumentMaskDenseBitset)
+  ->Apply(MaskArgs);
+
+BENCHMARK_TEMPLATE(BmIterateDeleted, DocumentDeletedHashMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIterateDeleted, DocumentBitMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIterateDeleted, DocumentAliveHashMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIterateAlive, DocumentDeletedHashMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIterateAlive, DocumentBitMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIterateAlive, DocumentAliveHashMask)->Apply(MaskArgs);
+
 BENCHMARK_TEMPLATE(BmScanIsDeleted, DocumentDeletedHashMask)->Apply(MaskArgs);
 BENCHMARK_TEMPLATE(BmScanIsDeleted, DocumentBitMask)->Apply(MaskArgs);
 BENCHMARK_TEMPLATE(BmScanIsDeleted, DocumentAliveHashMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIsDeleted, DocumentDeletedHashMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIsDeleted, DocumentBitMask)->Apply(MaskArgs);
+BENCHMARK_TEMPLATE(BmIsDeleted, DocumentAliveHashMask)->Apply(MaskArgs);
 BENCHMARK(BmDispatchInsideLoop)->Args({1000000, 30});
 BENCHMARK(BmDispatchOutsideLoop)->Args({1000000, 30});
 
