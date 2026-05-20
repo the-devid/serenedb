@@ -4,8 +4,14 @@
 #include <jemalloc/jemalloc.h>
 #endif
 
+#include <iresearch/analysis/tokenizers.hpp>
+#include <iresearch/formats/formats.hpp>
 #include <iresearch/formats/segment_meta_writer.hpp>
+#include <iresearch/index/directory_reader.hpp>
 #include <iresearch/index/document_mask.hpp>
+#include <iresearch/index/index_writer.hpp>
+#include <iresearch/search/term_filter.hpp>
+#include <iresearch/store/data_output.hpp>
 #include <iresearch/store/memory_directory.hpp>
 #include <numeric>
 #include <random>
@@ -18,6 +24,7 @@ using irs::DocumentDeletedHashMask;
 using irs::DocumentMask;
 using irs::DocumentMaskKind;
 using std::vector;
+using std::string_literals::operator""s;
 
 namespace {
 
@@ -310,6 +317,140 @@ void MaskArgs(benchmark::internal::Benchmark* b) {
     }
   }
 }
+
+// Benchmark that builds index to test DocumentMask performance w.r.t. actual
+// query execution
+
+class JustToken {
+ public:
+  JustToken(const std::string& name, const std::string& token)
+    : _name(name), _token(token) {}
+
+  irs::IndexFeatures GetIndexFeatures() const {
+    return irs::IndexFeatures::None;
+  }
+  irs::Tokenizer& GetTokens() const {
+    _tok.reset(_token);
+    return _tok;
+  }
+  std::string_view Name() const { return _name; }
+  bool Write(irs::DataOutput& out) const { return false; }
+
+ private:
+  std::string _name;
+  std::string _token;
+  mutable irs::StringTokenizer _tok;
+};
+
+struct JustTokensIndex {
+  std::unique_ptr<irs::MemoryDirectory> dir;
+  irs::Format::ptr format;
+  irs::DirectoryReader reader;
+};
+
+JustTokensIndex
+PrepareIndex(size_t doc_count, size_t deleted_doc_count) {
+  constexpr size_t kSeed = 43;
+
+  vector<size_t> doc_ids(doc_count);
+  std::iota(doc_ids.begin(), doc_ids.end(), 0);
+
+  std::mt19937 rng(kSeed);
+
+  std::shuffle(doc_ids.begin(), doc_ids.end(), rng);
+  vector<bool> is_x(doc_count);
+  for (size_t i = 0; i < doc_count / 2; ++i) {
+    is_x[doc_ids[i]] = true;
+  }
+  std::shuffle(doc_ids.begin(), doc_ids.end(), rng);
+  vector<bool> is_deleted(doc_count);
+  for (size_t i = 0; i < deleted_doc_count; ++i) {
+    is_deleted[doc_ids[i]] = true;
+  }
+
+  irs::formats::Init();
+  auto format = irs::formats::Get("1_5simd"s);
+  if (!format) {
+    std::fprintf(stderr, "format 1_5simd not registered");
+    std::abort();
+  }
+  auto dir = std::make_unique<irs::MemoryDirectory>();
+  auto writer = irs::IndexWriter::Make(*dir, format, irs::kOmCreate, {});
+
+  JustToken token_x{"value", "x"};
+  JustToken token_y{"value", "y"};
+  JustToken marker_dead{"status", "dead"};
+  JustToken marker_alive{"status", "alive"};
+
+  // Stage 1: fill up segment with token-pair documents
+  {
+    auto tx = writer->GetBatch();
+    for (size_t i = 0; i < doc_count; ++i) {
+      // NB: want to have exactly 1 segment
+      auto doc = tx.Insert(/*disable_flush=*/true);
+      if (is_x[i]) {
+        doc.Insert(token_x);
+      } else {
+        doc.Insert(token_y);
+      }
+      if (is_deleted[i]) {
+        doc.Insert(marker_dead);
+      } else {
+        doc.Insert(marker_alive);
+      }
+    }
+    tx.Commit();
+  }
+  // Stage 2: do remove
+  irs::ByTerm del_filter;
+  *del_filter.mutable_field() = "status";
+  del_filter.mutable_options()->term = irs::ViewCast<irs::byte_type>(std::string_view{"dead"});
+  {
+    auto tx = writer->GetBatch();
+    tx.Remove(del_filter);
+    tx.Commit();
+  }
+  writer->Commit();
+  auto reader = irs::DirectoryReader{*dir, format};
+  return {.dir = std::move(dir),
+          .format = std::move(format),
+          .reader = std::move(reader)};
+}
+
+void BmMaskedQuery(benchmark::State& state) {
+  const auto doc_count = static_cast<size_t>(state.range(0));
+  const auto delete_permille = static_cast<size_t>(state.range(1));
+  const auto deleted_doc_count = doc_count * delete_permille / 1000;
+
+  auto index = PrepareIndex(doc_count, deleted_doc_count);
+  irs::ByTerm filter;
+  *filter.mutable_field() = "value";
+  filter.mutable_options()->term =
+    irs::ViewCast<irs::byte_type>(std::string_view{"x"});
+  auto prepared = filter.prepare({.index = index.reader});
+
+  for (auto _ : state) {
+    size_t counter = 0;
+    for (const auto& subreader : index.reader) {
+      auto plain_tq_it = prepared->execute({.segment = subreader});
+      auto masked_it = subreader.mask(std::move(plain_tq_it));
+      while (masked_it->next()) {
+        ++counter;
+      }
+    }
+    benchmark::DoNotOptimize(counter);
+  }
+}
+
+void MaskedQueryArgs(benchmark::internal::Benchmark* b) {
+  for (auto doc_cnt : {4'000'000}) {
+    for (auto pmle : {1, 10, 100, 300, 500, 700, 900, 990, 999}) {
+      b->Args({doc_cnt, pmle});
+    }
+  }
+}
+
+BENCHMARK(BmMaskedQuery)->Apply(MaskedQueryArgs);
 
 #ifdef SERENEDB_HAVE_JEMALLOC
 BENCHMARK_TEMPLATE(BmMaskMemory, DocumentDeletedHashMask)
