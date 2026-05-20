@@ -84,25 +84,27 @@ inline uint64_t WriteDocumentMaskV0(IndexOutput& out,
 }
 
 inline uint64_t WriteDocumentMaskDeletedVarintList(
-  IndexOutput& out, const DocumentMask& docs_mask) {
+  Directory&, IndexOutput& out, const DocumentMask& docs_mask) {
   out.WriteV32(DocumentMaskOnDiskFormat::DeletedVarintList);
   const auto pos = out.Position();
   docs_mask.ForEachDeleted([&out](doc_id_t doc_id) { out.WriteV32(doc_id); });
   return out.Position() - pos;
 }
 inline uint64_t WriteDocumentMaskAliveVarintList(
-  IndexOutput& out, const DocumentMask& docs_mask) {
+  Directory&, IndexOutput& out, const DocumentMask& docs_mask) {
   out.WriteV32(DocumentMaskOnDiskFormat::AliveVarintList);
   const auto pos = out.Position();
   docs_mask.ForEachAlive([&out](doc_id_t doc_id) { out.WriteV32(doc_id); });
   return out.Position() - pos;
 }
 
-inline uint64_t WriteDocumentMaskDenseBitset(IndexOutput& out,
+inline uint64_t WriteDocumentMaskDenseBitset(Directory& dir, IndexOutput& out,
                                              const DocumentMask& docs_mask) {
   out.WriteV32(DocumentMaskOnDiskFormat::DeletedDenseBitset);
   // TODO: consider manual bytes filling, rather than using ManagedBitset
-  ManagedBitset deleted_docs(docs_mask.DocCount());
+  // TODO: decide on proper resource manager for the buffering bitset
+  ManagedBitset deleted_docs(docs_mask.DocCount(),
+                             *dir.ResourceManager().readers);
   docs_mask.ForEachDeleted([&deleted_docs](doc_id_t doc_id) {
     deleted_docs.set(doc_id - doc_limits::min());
   });
@@ -112,7 +114,7 @@ inline uint64_t WriteDocumentMaskDenseBitset(IndexOutput& out,
   return out.Position() - pos;
 }
 
-inline uint64_t WriteDocumentMask(IndexOutput& out,
+inline uint64_t WriteDocumentMask(Directory& dir, IndexOutput& out,
                                   const DocumentMask* docs_mask) {
   uint32_t doc_count = docs_mask ? docs_mask->DocCount() : 0;
   uint32_t deleted_doc_count = docs_mask ? docs_mask->DeletedDocCount() : 0;
@@ -124,11 +126,11 @@ inline uint64_t WriteDocumentMask(IndexOutput& out,
   }
 
   if (deleted_doc_count < 0.04 * doc_count) {
-    return WriteDocumentMaskDeletedVarintList(out, *docs_mask);
+    return WriteDocumentMaskDeletedVarintList(dir, out, *docs_mask);
   } else if (deleted_doc_count < 0.96 * doc_count) {
-    return WriteDocumentMaskDenseBitset(out, *docs_mask);
+    return WriteDocumentMaskDenseBitset(dir, out, *docs_mask);
   } else {
-    return WriteDocumentMaskAliveVarintList(out, *docs_mask);
+    return WriteDocumentMaskAliveVarintList(dir, out, *docs_mask);
   }
 }
 
@@ -165,7 +167,7 @@ inline void SegmentMetaWriterImpl::write(Directory& dir, std::string& meta_file,
   WriteStr(*out, meta.name);
   out->WriteV64(meta.version);
   out->WriteV32(meta.live_docs_count);
-  const auto docs_mask_size = WriteDocumentMask(*out, meta.docs_mask.get());
+  const auto docs_mask_size = WriteDocumentMask(dir, *out, meta.docs_mask.get());
   out->WriteV64(size_without_mask);
   WriteStrings(*out, meta.files);
   format_utils::WriteFooter(*out);

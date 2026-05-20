@@ -175,7 +175,7 @@ void BmIterateAlive(benchmark::State& state) {
   }
 }
 
-typedef uint64_t WriteDocumentMaskFn(irs::IndexOutput&,
+typedef uint64_t WriteDocumentMaskFn(irs::Directory&, irs::IndexOutput&,
                                      const irs::DocumentMask&);
 
 // Benchmarks on-disk mask write
@@ -189,13 +189,14 @@ void BmWriteDocumentMaskPayload(benchmark::State& state) {
 
   auto mask = BuildMask<MaskType>(doc_count, deleted_doc_count, kSeed);
 
+  irs::MemoryDirectory dir{};
   for (auto _ : state) {
     irs::MemoryFile file{irs::IResourceManager::gNoop};
     irs::MemoryIndexOutput out{file};
 
     out.WriteV32(static_cast<uint32_t>(doc_count));
     out.WriteV32(static_cast<uint32_t>(deleted_doc_count));
-    benchmark::DoNotOptimize(WriteDocumentMaskPayload(out, mask));
+    benchmark::DoNotOptimize(WriteDocumentMaskPayload(dir, out, mask));
     out.Flush();
     state.counters["bytes_written"] = static_cast<double>(file.Length());
   }
